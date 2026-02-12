@@ -19,6 +19,7 @@ from robosuite.environments.base import EnvMeta
 from scipy.spatial.transform import Rotation
 
 from robosuite.models.robots import PandaOmron
+from robosuite.models.robots.compositional import PandaDexLeapRHOmron
 
 import robocasa
 import robocasa.macros as macros
@@ -297,7 +298,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             controller_configs = refactor_composite_controller_config(
                 controller_configs, robots[0], arms
             )
-            if robots[0] == "PandaOmron":
+            if robots[0] in ("PandaOmron", "PandaDexLeapRHOmron"):
                 if "composite_controller_specific_configs" not in controller_configs:
                     controller_configs["composite_controller_specific_configs"] = {}
                 controller_configs["composite_controller_specific_configs"][
@@ -339,7 +340,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         super()._load_model()
 
         for robot in self.robots:
-            if isinstance(robot.robot_model, PandaOmron):
+            if isinstance(robot.robot_model, (PandaOmron, PandaDexLeapRHOmron)):
                 robot.init_qpos = (
                     -0.01612974,
                     -1.03446714,

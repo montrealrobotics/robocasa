@@ -13,6 +13,29 @@ from termcolor import colored
 import robocasa
 
 
+LEAP_HAND_DOF = 16
+ROBOT_SWAPPED = (
+    True  # Set to True when replaying with a different robot than the dataset
+)
+
+
+def remap_panda_omron_actions_to_leap(actions):
+    """
+    Remap 12-dim PandaOmron actions to 27-dim PandaDexLeapRHOmron actions.
+
+    PandaOmron body_part_ordering:  [right(6), right_gripper(1), base(3), torso(1), base_mode(1)] = 12
+    PandaDexLeapRHOmron ordering:   [right(6), right_gripper(16), base(3), torso(1), base_mode(1)] = 27
+
+    The original 1-DOF gripper action is discarded; 16 zeros are inserted for the LEAP hand.
+    """
+    n = actions.shape[0]
+    arm = actions[:, 0:6]  # 6-dim arm OSC_POSE
+    # actions[:, 6] is the 1-DOF gripper — discard
+    base_torso_mode = actions[:, 7:]  # base(3) + torso(1) + base_mode(1) = 5
+    leap_zeros = np.zeros((n, LEAP_HAND_DOF))
+    return np.concatenate([arm, leap_zeros, base_torso_mode], axis=1)
+
+
 def playback_trajectory_with_env(
     env,
     initial_state,
@@ -60,7 +83,7 @@ def playback_trajectory_with_env(
         if lang is not None:
             print(colored(f"Instruction: {lang}", "green"))
         print(colored("Spawning environment...", "yellow"))
-    reset_to(env, initial_state)
+    reset_to(env, initial_state, skip_model_and_state=ROBOT_SWAPPED)
 
     traj_len = states.shape[0]
     action_playback = actions is not None
@@ -75,8 +98,9 @@ def playback_trajectory_with_env(
 
         if action_playback:
             env.step(actions[i])
-            if i < traj_len - 1:
+            if not ROBOT_SWAPPED and i < traj_len - 1:
                 # check whether the actions deterministically lead to the same recorded states
+                # (skip when robot is swapped since state dimensions differ)
                 state_playback = np.array(env.sim.get_state().flatten())
                 if not np.all(np.equal(states[i + 1], state_playback)):
                     err = np.linalg.norm(states[i + 1] - state_playback)
@@ -184,7 +208,24 @@ def get_env_metadata_from_dataset(dataset_path, ds_format="robomimic"):
     dataset_path = os.path.expanduser(dataset_path)
     f = h5py.File(dataset_path, "r")
     if ds_format == "robomimic":
-        env_meta = json.loads(f["data"].attrs["env_args"])
+        if "env_args" in f["data"].attrs:
+            env_meta = json.loads(f["data"].attrs["env_args"])
+            # Override robot to PandaDexLeapRHOmron for dexterous hand playback
+            env_meta["env_kwargs"]["robots"] = "PandaDexLeapRHOmron"
+            # Disable data-collection-only features that can fail during playback
+            env_meta["env_kwargs"].pop("generative_textures", None)
+            env_meta["env_kwargs"].pop("randomize_cameras", None)
+        else:
+            env_meta = {
+                "env_name": "CoffeePressButton",
+                "type": "kitchen",
+                "env_kwargs": {
+                    "robots": "PandaDexLeapRHOmron"
+                    # "camera_name": "robot0_agentview_center",
+                    # "observation_height": 128,
+                    # "observation_width": 128,
+                },
+            }
     else:
         raise ValueError
     f.close()
@@ -211,21 +252,36 @@ class ObservationKeyToModalityDict(dict):
         return super(ObservationKeyToModalityDict, self).__getitem__(item)
 
 
-def reset_to(env, state):
+def reset_to(env, state, skip_model_and_state=False):
     """
     Reset to a specific simulator state.
 
     Args:
         state (dict): current simulator state that contains one or more of:
-            - states (np.ndarray): initial state of the mujoco environment
+            - states (np.ndarray): initial state of the mujoco environment.
+                Corresponds to the flattened (states) in the spec.
             - model (str): mujoco scene xml
+        skip_model_and_state (bool): if True, skip loading the dataset's XML model
+            and sim state. Used when replaying with a different robot, since the
+            dataset XML and state dimensions belong to the original robot.
 
     Returns:
-        observation (dict): observation dictionary after setting the simulator state (only
-            if "states" is in @state)
+        None
     """
     should_ret = False
-    if "model" in state:
+    if skip_model_and_state:
+        # When robot is swapped, we can't reuse the dataset's XML or state
+        # (different geoms, different joint dimensions). Just reset the env.
+        if state.get("ep_meta", None) is not None:
+            ep_meta = json.loads(state["ep_meta"])
+        else:
+            ep_meta = {}
+        if hasattr(env, "set_attrs_from_ep_meta"):
+            env.set_attrs_from_ep_meta(ep_meta)
+        elif hasattr(env, "set_ep_meta"):
+            env.set_ep_meta(ep_meta)
+        env.reset()
+    elif "model" in state:
         if state.get("ep_meta", None) is not None:
             # set relevant episode information
             ep_meta = json.loads(state["ep_meta"])
@@ -253,7 +309,7 @@ def reset_to(env, state):
         # hide teleop visualization after restoring from model
         # env.sim.model.site_rgba[env.eef_site_id] = np.array([0., 0., 0., 0.])
         # env.sim.model.site_rgba[env.eef_cylinder_id] = np.array([0., 0., 0., 0.])
-    if "states" in state:
+    if not skip_model_and_state and "states" in state:
         env.sim.set_state_from_flattened(state["states"])
         env.sim.forward()
         should_ret = True
@@ -391,8 +447,10 @@ def playback_dataset(args):
         )  # cannot use both relative and absolute actions
         if args.use_actions:
             actions = f["data/{}/actions".format(ep)][()]
+            actions = remap_panda_omron_actions_to_leap(actions)
         elif args.use_abs_actions:
-            actions = f["data/{}/actions_abs".format(ep)][()]  # absolute actions
+            actions = f["data/{}/actions_abs".format(ep)][()]
+            actions = remap_panda_omron_actions_to_leap(actions)
 
         playback_trajectory_with_env(
             env=env,
