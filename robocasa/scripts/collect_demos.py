@@ -349,8 +349,9 @@ if __name__ == "__main__":
     parser.add_argument(
         "--camera",
         type=str,
+        nargs="+",
         default=None,
-        help="Which camera to use for collecting demos",
+        help="Which camera(s) to use for collecting demos",
     )
     parser.add_argument(
         "--controller",
@@ -484,6 +485,20 @@ if __name__ == "__main__":
         config["obj_instance_split"] = "A"
         # config["obj_instance_split"] = None
         # config["obj_registries"] = ("aigen",)
+
+    # Automatically un-nest single cameras or enforce OpenCV for multiple cameras
+    if isinstance(args.camera, list):
+        if len(args.camera) == 1:
+            args.camera = args.camera[0]
+        elif len(args.camera) > 1:
+            if args.renderer != "mujoco":
+                print(
+                    colored(
+                        f"Warning: Multiple cameras ({args.camera}) specified. Forcing renderer to 'mujoco' (OpenCV renderer).",
+                        "yellow",
+                    )
+                )
+                args.renderer = "mujoco"
 
     # Create environment
     env = robosuite.make(
