@@ -27,6 +27,7 @@ setup(
         "tqdm",
         "termcolor",
         "imageio",
+        "imageio-ffmpeg",
         "h5py",
         "lxml",
         "hidapi",

@@ -32,6 +32,8 @@ from robocasa.utils.robomimic.robomimic_dataset_utils import convert_to_robomimi
 
 
 def is_empty_input_spacemouse(action_dict):
+    if "right_delta" not in action_dict:
+        return False
     if not np.all(action_dict["right_delta"] == 0):
         return False
     if "base_mode" in action_dict and action_dict["base_mode"] != -1:
@@ -360,7 +362,7 @@ if __name__ == "__main__":
         "--device",
         type=str,
         default="spacemouse",
-        choices=["keyboard", "keyboardmobile", "spacemouse", "dummy"],
+        choices=["keyboard", "keyboardmobile", "spacemouse", "dummy", "quest_rokoko"],
     )
     parser.add_argument(
         "--pos-sensitivity",
@@ -373,6 +375,38 @@ if __name__ == "__main__":
         type=float,
         default=4.0,
         help="How much to scale rotation user inputs",
+    )
+
+    # ── Quest / Rokoko device arguments ──
+    parser.add_argument(
+        "--vr-ip",
+        type=str,
+        default="192.168.50.89",
+        help="(quest_rokoko only) IP of the Meta Quest headset",
+    )
+    parser.add_argument(
+        "--local-ip",
+        type=str,
+        default="192.168.50.178",
+        help="(quest_rokoko only) Local machine IP address",
+    )
+    parser.add_argument(
+        "--pose-cmd-port",
+        type=int,
+        default=12346,
+        help="(quest_rokoko only) UDP port for Quest wrist pose data",
+    )
+    parser.add_argument(
+        "--rokoko-port",
+        type=int,
+        default=14043,
+        help="(quest_rokoko only) UDP port for Rokoko glove data",
+    )
+    parser.add_argument(
+        "--ik-result-port",
+        type=int,
+        default=12345,
+        help="(quest_rokoko only) UDP port to send IK results back to Quest",
     )
 
     parser.add_argument("--debug", action="store_true")
@@ -495,6 +529,19 @@ if __name__ == "__main__":
             rot_sensitivity=args.rot_sensitivity,
             vendor_id=macros.SPACEMOUSE_VENDOR_ID,
             product_id=macros.SPACEMOUSE_PRODUCT_ID,
+        )
+    elif args.device == "quest_rokoko":
+        from robosuite.devices.quest_rokoko import QuestRokoko
+
+        device = QuestRokoko(
+            env=env,
+            vr_ip=args.vr_ip,
+            local_ip=args.local_ip,
+            pose_cmd_port=args.pose_cmd_port,
+            ik_result_port=args.ik_result_port,
+            rokoko_port=args.rokoko_port,
+            pos_sensitivity=args.pos_sensitivity,
+            rot_sensitivity=args.rot_sensitivity,
         )
     else:
         raise ValueError
