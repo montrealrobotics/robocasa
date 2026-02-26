@@ -93,6 +93,13 @@ CAM_CONFIGS = dict(
     ### Add robot specific configs here ####
     PandaMobile=dict(),
     GR1FixedLowerBody=dict(),
+    PandaDexLeapRHOmron=dict(
+        robot0_eye_in_hand=dict(
+            pos=[-0.05, -0.031, 0.074],
+            quat=[-0.420, 0.570, 0.576, -0.409],
+            parent_body="robot0_right_hand",
+        )
+    ),
 )
 
 

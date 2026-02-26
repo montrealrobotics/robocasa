@@ -120,6 +120,12 @@ def playback_trajectory_with_env(
         if render:
             if env.viewer is None:
                 env.initialize_renderer()
+                if camera_names is not None and len(camera_names) > 0:
+                    try:
+                        cam_id = env.sim.model.camera_name2id(camera_names[0])
+                        env.viewer.set_camera(cam_id)
+                    except Exception as e:
+                        print(f"Could not set camera {camera_names[0]}: {e}")
 
             # so that mujoco viewer renders
             env.viewer.update()
@@ -343,7 +349,7 @@ def playback_dataset(args):
     if args.render_image_names is None:
         # We fill in the automatic values
         env_meta = get_env_metadata_from_dataset(dataset_path=args.dataset)
-        args.render_image_names = "robot0_agentview_center"
+        args.render_image_names = "robot0_eye_in_hand"  # "robot0_agentview_center"
 
     if args.render:
         # on-screen rendering can only support one camera
