@@ -217,7 +217,7 @@ def get_env_metadata_from_dataset(dataset_path, ds_format="robomimic"):
         if "env_args" in f["data"].attrs:
             env_meta = json.loads(f["data"].attrs["env_args"])
             # Override robot to PandaDexLeapRHOmron for dexterous hand playback
-            env_meta["env_kwargs"]["robots"] = "PandaDexLeapRHOmron"
+            # env_meta["env_kwargs"]["robots"] = "PandaDexLeapRHOmron"
             # Disable data-collection-only features that can fail during playback
             env_meta["env_kwargs"].pop("generative_textures", None)
             env_meta["env_kwargs"].pop("randomize_cameras", None)
@@ -226,10 +226,7 @@ def get_env_metadata_from_dataset(dataset_path, ds_format="robomimic"):
                 "env_name": "CoffeePressButton",
                 "type": "kitchen",
                 "env_kwargs": {
-                    "robots": "PandaDexLeapRHOmron"
-                    # "camera_name": "robot0_agentview_center",
-                    # "observation_height": 128,
-                    # "observation_width": 128,
+                    # "robots": "PandaDexLeapRHOmron"
                 },
             }
     else:
@@ -453,10 +450,10 @@ def playback_dataset(args):
         )  # cannot use both relative and absolute actions
         if args.use_actions:
             actions = f["data/{}/actions".format(ep)][()]
-            actions = remap_panda_omron_actions_to_leap(actions)
+            # actions = remap_panda_omron_actions_to_leap(actions)
         elif args.use_abs_actions:
             actions = f["data/{}/actions_abs".format(ep)][()]
-            actions = remap_panda_omron_actions_to_leap(actions)
+            # actions = remap_panda_omron_actions_to_leap(actions)
 
         playback_trajectory_with_env(
             env=env,
