@@ -588,4 +588,5 @@ if __name__ == "__main__":
             hdf5_path = gather_demonstrations_as_hdf5(
                 tmp_directory, new_dir, env_info, excluded_episodes=excluded_eps
             )
-            convert_to_robomimic_format(hdf5_path)
+            if hdf5_path is not None:
+                convert_to_robomimic_format(hdf5_path)
