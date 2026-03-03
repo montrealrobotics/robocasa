@@ -340,7 +340,21 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         super()._load_model()
 
         for robot in self.robots:
-            if isinstance(robot.robot_model, (PandaOmron, PandaDexLeapRHOmron)):
+            if isinstance(robot.robot_model, PandaDexLeapRHOmron):
+                # Dataset-derived arm pose (avg at 0.7s, j6 set to 1.0 for wrist-down).
+                # More retracted than PandaOmron default to prevent the larger
+                # LEAP hand from clipping into counter-mounted fixtures on spawn.
+                robot.init_qpos = (
+                    -0.02871603,
+                    -1.59282577,
+                    -0.08036078,
+                    -2.56806231,
+                    0.16381425,
+                    1.0,
+                    0.58635169,
+                )
+                robot.init_torso_qpos = np.array([0.0])
+            elif isinstance(robot.robot_model, PandaOmron):
                 robot.init_qpos = (
                     -0.01612974,
                     -1.03446714,
