@@ -603,7 +603,7 @@ def replace_floor_texture(rng, initial_state: str, new_floor_texture_file: str =
     floor_tex_name = None
     for mat in asset.findall("material"):
         name = mat.get("name")
-        if "floor" in name and "backing" not in name:
+        if "floor" in name and "backing" not in name and "gripper" not in name:
             floor_tex_name = mat.get("texture")
             break
     assert floor_tex_name is not None
