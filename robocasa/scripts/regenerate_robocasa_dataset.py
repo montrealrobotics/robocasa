@@ -33,6 +33,7 @@ Usage:
 
 import argparse
 import datetime
+import fnmatch
 import json
 import os
 import random
@@ -241,15 +242,19 @@ def main(args):
     os.makedirs(video_out_dir, exist_ok=True)
     print(f"Video outputs will be saved to: {video_out_dir}")
 
-    # Find all HDF5 files in the dataset path (recursively)
+    # Find all HDF5 files in the dataset path
     hdf5_files = set()
-    for root, dirs, files in os.walk(args.dataset_path, followlinks=True):
-        for file in files:
+    if os.path.isfile(args.dataset_path):
+        if args.dataset_path.lower().endswith(".hdf5"):
+            hdf5_files.add(args.dataset_path)
+    else:
+        for root, dirs, files in os.walk(args.dataset_path, followlinks=True):
             if "kitchen_navigate" in root or "kitchen_navigate" in dirs:
                 continue  # Skip kitchen_navigate tasks
-            if file.lower().endswith(("demo_gentex_im128_randcams.hdf5")):
-                filepath = os.path.join(root, file)
-                hdf5_files.add(filepath)
+            for file in files:
+                if fnmatch.fnmatch(file.lower(), args.filename_pattern.lower()):
+                    filepath = os.path.join(root, file)
+                    hdf5_files.add(filepath)
     hdf5_files = list(hdf5_files)
     hdf5_files.sort()
 
@@ -301,7 +306,10 @@ def main(args):
 
         # Create new HDF5 file for regenerated demos
         # Get relative path structure
-        rel_path = os.path.relpath(hdf5_file, args.dataset_path)
+        if os.path.isfile(args.dataset_path):
+            rel_path = os.path.basename(hdf5_file)
+        else:
+            rel_path = os.path.relpath(hdf5_file, args.dataset_path)
         new_data_path = os.path.join(args.target_dir, rel_path)
         os.makedirs(os.path.dirname(new_data_path), exist_ok=True)
 
@@ -321,7 +329,13 @@ def main(args):
 
         # List of all demonstration episodes (sorted in increasing number order)
         demos = list(orig_data_file["data"].keys())
-        inds = np.argsort([int(elem[5:]) for elem in demos])
+
+        def _get_demo_id(demo_name):
+            # demo_name could be "demo_10" or "demo_10_style3"
+            parts = demo_name.split("_")
+            return int(parts[1]) if len(parts) > 1 else int(demo_name[5:])
+
+        inds = np.argsort([_get_demo_id(elem) for elem in demos])
         demos = [demos[i] for i in inds]
 
         for ind in range(len(demos)):
@@ -850,6 +864,12 @@ if __name__ == "__main__":
         type=str,
         help="Path to directory containing raw HDF5 dataset. Example: ./robocasa/datasets/v0.1/single_stage/",
         required=True,
+    )
+    parser.add_argument(
+        "--filename_pattern",
+        type=str,
+        default="demo_augstyles_gentex_im224_randcams.hdf5",
+        help="Glob pattern or exact filename to match HDF5 files (default: 'demo_augstyles_gentex_im224_randcams.hdf5'). Use '*' to match any hdf5 file, e.g. '*.hdf5'.",
     )
     parser.add_argument(
         "--target_dir",
