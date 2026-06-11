@@ -345,13 +345,20 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                 # More retracted than PandaOmron default to prevent the larger
                 # LEAP hand from clipping into counter-mounted fixtures on spawn.
                 robot.init_qpos = (
-                    -0.02871603,
-                    -1.59282577,
-                    -0.08036078,
-                    -2.56806231,
-                    0.16381425,
-                    1.0,
-                    0.58635169,
+                    # -0.02871603,
+                    # -1.59282577,
+                    # -0.08036078,
+                    # -2.56806231,
+                    # 0.16381425,
+                    # 1.0,
+                    # 0.58635169,
+                    -0.01612974,
+                    -1.03446714,
+                    -0.02397936,
+                    -2.27550888,
+                    0.03932365,
+                    1.51639493,
+                    0.69615947,
                 )
                 robot.init_torso_qpos = np.array([0.0])
             elif isinstance(robot.robot_model, PandaOmron):
