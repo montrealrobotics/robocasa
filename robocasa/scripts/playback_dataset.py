@@ -11,12 +11,13 @@ import robosuite
 from termcolor import colored
 
 import robocasa
+from robocasa.models.scenes.scene_registry import StyleType
 
 
 LEAP_HAND_DOF = 16
-ROBOT_SWAPPED = (
-    True  # Set to True when replaying with a different robot than the dataset
-)
+# ROBOT_SWAPPED = (
+#     True  # Set to True when replaying with a different robot than the dataset
+# )
 
 
 def remap_panda_omron_actions_to_leap(actions):
@@ -83,12 +84,27 @@ def playback_trajectory_with_env(
         if lang is not None:
             print(colored(f"Instruction: {lang}", "green"))
         print(colored("Spawning environment...", "yellow"))
-    reset_to(env, initial_state, skip_model_and_state=ROBOT_SWAPPED)
+    reset_to(env, initial_state, skip_model_and_state=True)
 
     traj_len = states.shape[0]
     action_playback = actions is not None
     if action_playback:
         assert states.shape[0] == actions.shape[0]
+
+    # Check for state dimension mismatch (can happen with style override)
+    env_state_dim = env.sim.get_state().flatten().shape[0]
+    dataset_state_dim = states.shape[1] if len(states.shape) > 1 else states.shape[0]
+    state_dim_match = env_state_dim == dataset_state_dim
+    if not state_dim_match:
+        print(
+            colored(
+                f"WARNING: state dimension mismatch! "
+                f"env={env_state_dim}, dataset={dataset_state_dim}. "
+                f"Different style likely uses different fixture models. "
+                f"Skipping state replay — only the initial scene will be rendered.",
+                "red",
+            )
+        )
 
     if render is False:
         print(colored("Running episode...", "yellow"))
@@ -98,7 +114,7 @@ def playback_trajectory_with_env(
 
         if action_playback:
             env.step(actions[i])
-            if not ROBOT_SWAPPED and i < traj_len - 1:
+            if False and i < traj_len - 1:
                 # check whether the actions deterministically lead to the same recorded states
                 # (skip when robot is swapped since state dimensions differ)
                 state_playback = np.array(env.sim.get_state().flatten())
@@ -113,8 +129,9 @@ def playback_trajectory_with_env(
                                 "yellow",
                             )
                         )
-        else:
+        elif state_dim_match:
             reset_to(env, {"states": states[i]})
+        # else: skip state loading due to dimension mismatch
 
         # on-screen render
         if render:
@@ -331,6 +348,53 @@ def reset_to(env, state, skip_model_and_state=False):
     return None
 
 
+def _override_style_in_initial_state(initial_state, style_id):
+    """
+    Return a copy of initial_state with the ep_meta style_id overridden.
+    """
+    from copy import deepcopy
+
+    new_state = deepcopy(initial_state)
+    if new_state.get("ep_meta") is not None:
+        ep_meta = json.loads(new_state["ep_meta"])
+    else:
+        ep_meta = {}
+    ep_meta["style_id"] = int(style_id)
+    new_state["ep_meta"] = json.dumps(ep_meta, indent=4)
+    return new_state
+
+
+def _style_name(style_id):
+    """Return human-readable style name for a style id."""
+    int_to_name = {s.value: s.name.lower() for s in StyleType if s.value >= 0}
+    return int_to_name.get(int(style_id), f"style{style_id}")
+
+
+# Coffee machine model used by each style (from kitchen_styles/*.yaml)
+STYLE_COFFEE_MACHINE = {
+    0: "delonghi_espresso",  # industrial
+    1: "nespresso",  # scandanavian
+    2: "delonghi_espresso_2",  # coastal
+    3: "delonghi_espresso_2",  # modern_1
+    4: "delonghi_espresso",  # modern_2
+    5: "delonghi_espresso",  # traditional_1
+    6: "delonghi_espresso_2",  # traditional_2
+    7: "nespresso",  # farmhouse
+    8: "nespresso",  # rustic
+    9: "delonghi_espresso",  # mediterranean
+    10: "nespresso",  # transitional_1
+    11: "delonghi_espresso_2",  # transitional_2
+}
+
+
+def _styles_with_same_coffee_machine(style_id):
+    """Return list of style IDs that use the same coffee machine model."""
+    target = STYLE_COFFEE_MACHINE.get(int(style_id))
+    if target is None:
+        return list(range(12))
+    return [sid for sid, cm in STYLE_COFFEE_MACHINE.items() if cm == target]
+
+
 def playback_dataset(args):
     # some arg checking
     write_video = args.render is not True
@@ -358,20 +422,25 @@ def playback_dataset(args):
             not args.use_actions and not args.use_abs_actions
         ), "playback with observations is offline and does not support action playback"
 
+    # Determine which styles to play back
+    style_ids = getattr(args, "style_ids", None)
+    if style_ids is not None:
+        # Expand "all" to the full list of style IDs
+        if style_ids == ["all"]:
+            style_ids = list(range(12))
+        else:
+            style_ids = [int(s) for s in style_ids]
+        print(
+            colored(
+                f"Style override enabled: will replay each trajectory with styles {style_ids}",
+                "cyan",
+            )
+        )
+
     env = None
 
     # create environment only if not playing back with observations
     if not args.use_obs:
-        # # need to make sure ObsUtils knows which observations are images, but it doesn't matter
-        # # for playback since observations are unused. Pass a dummy spec here.
-        # dummy_spec = dict(
-        #     obs=dict(
-        #             low_dim=["robot0_eef_pos"],
-        #             rgb=[],
-        #         ),
-        # )
-        # initialize_obs_utils_with_obs_specs(obs_modality_specs=dummy_spec)
-
         env_meta = get_env_metadata_from_dataset(dataset_path=args.dataset)
         if args.use_abs_actions:
             env_meta["env_kwargs"]["controller_configs"][
@@ -384,6 +453,12 @@ def playback_dataset(args):
         env_kwargs["renderer"] = "mjviewer"
         env_kwargs["has_offscreen_renderer"] = write_video
         env_kwargs["use_camera_obs"] = False
+
+        # When overriding styles, allow all styles the env might need
+        if style_ids is not None:
+            env_kwargs["layout_and_style_ids"] = None
+            env_kwargs["style_ids"] = style_ids
+            env_kwargs.pop("layout_ids", None)
 
         if args.verbose:
             print(
@@ -417,7 +492,7 @@ def playback_dataset(args):
 
     # maybe dump video
     video_writer = None
-    if write_video:
+    if write_video and style_ids is None:
         video_writer = imageio.get_writer(args.video_path, fps=20)
 
     for ind in range(len(demos)):
@@ -450,28 +525,109 @@ def playback_dataset(args):
         )  # cannot use both relative and absolute actions
         if args.use_actions:
             actions = f["data/{}/actions".format(ep)][()]
-            # actions = remap_panda_omron_actions_to_leap(actions)
         elif args.use_abs_actions:
             actions = f["data/{}/actions_abs".format(ep)][()]
-            # actions = remap_panda_omron_actions_to_leap(actions)
 
-        playback_trajectory_with_env(
-            env=env,
-            initial_state=initial_state,
-            states=states,
-            actions=actions,
-            render=args.render,
-            video_writer=video_writer,
-            video_skip=args.video_skip,
-            camera_names=args.render_image_names,
-            first=args.first,
-            verbose=args.verbose,
-            camera_height=args.camera_height,
-            camera_width=args.camera_width,
-        )
+        # --- Style override: replay each trajectory with each requested style ---
+        if style_ids is not None:
+            # Read original style for the label
+            orig_ep_meta = (
+                json.loads(initial_state["ep_meta"])
+                if initial_state.get("ep_meta")
+                else {}
+            )
+            orig_style = orig_ep_meta.get("style_id", "?")
+            orig_layout = orig_ep_meta.get("layout_id", "?")
+            print(
+                colored(
+                    f"  Original: layout={orig_layout}, style={orig_style} ({_style_name(orig_style)})",
+                    "green",
+                )
+            )
+
+            # Determine which styles have a compatible coffee machine
+            orig_coffee = (
+                STYLE_COFFEE_MACHINE.get(int(orig_style)) if orig_style != "?" else None
+            )
+            compatible_styles = (
+                _styles_with_same_coffee_machine(orig_style)
+                if orig_style != "?"
+                else None
+            )
+
+            for sid in style_ids:
+                style_label = _style_name(sid)
+
+                # Skip styles with a different coffee machine model
+                if compatible_styles is not None and sid not in compatible_styles:
+                    target_coffee = STYLE_COFFEE_MACHINE.get(sid, "?")
+                    print(
+                        colored(
+                            f"  Skipping style {sid} ({style_label}): "
+                            f"coffee machine mismatch ({target_coffee} vs {orig_coffee})",
+                            "yellow",
+                        )
+                    )
+                    continue
+
+                print(
+                    colored(
+                        f"  Replaying {ep} with style {sid} ({style_label})...",
+                        "cyan",
+                    )
+                )
+                overridden_state = _override_style_in_initial_state(initial_state, sid)
+
+                # Per-style video writer
+                vw = None
+                style_video_path = None
+                if write_video:
+                    base = args.video_path.rsplit(".", 1)[0]
+                    ext = (
+                        args.video_path.rsplit(".", 1)[1]
+                        if "." in args.video_path
+                        else "mp4"
+                    )
+                    style_video_path = f"{base}_{ep}_style{sid}_{style_label}.{ext}"
+                    vw = imageio.get_writer(style_video_path, fps=20)
+
+                playback_trajectory_with_env(
+                    env=env,
+                    initial_state=overridden_state,
+                    states=states,
+                    actions=actions,
+                    render=args.render,
+                    video_writer=vw,
+                    video_skip=args.video_skip,
+                    camera_names=args.render_image_names,
+                    first=args.first,
+                    verbose=args.verbose,
+                    camera_height=args.camera_height,
+                    camera_width=args.camera_width,
+                )
+
+                if vw is not None:
+                    vw.close()
+                    print(colored(f"  Saved: {style_video_path}", "green"))
+        else:
+            # Normal playback (no style override)
+            playback_trajectory_with_env(
+                env=env,
+                initial_state=initial_state,
+                states=states,
+                actions=actions,
+                render=args.render,
+                video_writer=video_writer,
+                video_skip=args.video_skip,
+                camera_names=args.render_image_names,
+                first=args.first,
+                verbose=args.verbose,
+                camera_height=args.camera_height,
+                camera_width=args.camera_width,
+            )
 
     f.close()
-    if write_video:
+    if write_video and video_writer is not None:
         print(colored(f"Saved video to {args.video_path}", "green"))
         video_writer.close()
 
@@ -590,6 +746,20 @@ def get_playback_args():
         type=int,
         default=512,
         help="(optional, for offscreen rendering) width of image observations",
+    )
+
+    parser.add_argument(
+        "--style_ids",
+        type=str,
+        nargs="+",
+        default=None,
+        help="override style(s) to replay trajectories with (0-11 or 'all'). "
+        "Each trajectory is replayed once per compatible style. "
+        "Styles with a different coffee machine model are automatically skipped. "
+        "Available styles: "
+        "0=industrial, 1=scandanavian, 2=coastal, 3=modern_1, 4=modern_2, "
+        "5=traditional_1, 6=traditional_2, 7=farmhouse, 8=rustic, "
+        "9=mediterranean, 10=transitional_1, 11=transitional_2",
     )
 
     args = parser.parse_args()

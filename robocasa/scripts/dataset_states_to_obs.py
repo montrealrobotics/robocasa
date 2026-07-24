@@ -336,6 +336,15 @@ def write_traj_to_file(
                                 data=np.array(action_dict[k][()]),
                             )
 
+                    # copy through raw teleop signals recorded at collection time (pre-IK Quest /
+                    # Rokoko data). These cannot be regenerated from states, so carry them forward.
+                    src_ep = f["data/{}".format(ep)]
+                    for k in src_ep:
+                        if k.startswith("teleop_") and isinstance(
+                            src_ep[k], h5py.Dataset
+                        ):
+                            ep_data_grp.create_dataset(k, data=np.array(src_ep[k][()]))
+
                     # episode metadata
                     ep_data_grp.attrs["model_file"] = traj["initial_state_dict"][
                         "model"

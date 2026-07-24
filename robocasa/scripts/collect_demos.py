@@ -153,6 +153,13 @@ def collect_human_trajectory(
         env_action[device.active_robot] = active_robot.create_action_vector(action_dict)
         env_action = np.concatenate(env_action)
 
+        # (if applicable) log raw teleop signals that cannot be reconstructed from sim states.
+        # Delegated through the wrapper stack to the DataCollectionWrapper.
+        if hasattr(device, "get_teleop_obs") and hasattr(env, "set_next_step_data"):
+            teleop_obs = device.get_teleop_obs()
+            if teleop_obs is not None:
+                env.set_next_step_data(teleop_obs)
+
         # Run environment step
         obs, _, _, _ = env.step(env_action)
         if render:
@@ -236,6 +243,8 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info, excluded_episode
         states = []
         actions = []
         actions_abs = []
+        # extra per-step datasets (e.g. raw teleop signals), keyed by name
+        extra_data = {}
         # success = False
 
         for state_file in sorted(glob(state_paths)):
@@ -247,6 +256,11 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info, excluded_episode
                 actions.append(ai["actions"])
                 if "actions_abs" in ai:
                     actions_abs.append(ai["actions_abs"])
+                # gather any other per-step arrays (raw teleop, etc.) so they persist to hdf5
+                for k, v in ai.items():
+                    if k in ("actions", "actions_abs"):
+                        continue
+                    extra_data.setdefault(k, []).append(v)
             # success = success or dic["successful"]
 
         if len(states) == 0:
@@ -284,6 +298,20 @@ def gather_demonstrations_as_hdf5(directory, out_dir, env_info, excluded_episode
         if len(actions_abs) > 0:
             print(np.array(actions_abs).shape)
             ep_data_grp.create_dataset("actions_abs", data=np.array(actions_abs))
+
+        # write any extra per-step datasets (raw teleop signals, etc.). Only write when the key is
+        # present on every recorded step, so entries stay aligned with actions/states.
+        for k, vals in extra_data.items():
+            if len(vals) != len(actions):
+                print(
+                    colored(
+                        f"Warning: extra key '{k}' has {len(vals)} entries but {len(actions)} "
+                        f"actions; skipping to avoid misalignment.",
+                        "yellow",
+                    )
+                )
+                continue
+            ep_data_grp.create_dataset(k, data=np.array(vals))
 
         # else:
         #     pass
@@ -382,13 +410,13 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vr-ip",
         type=str,
-        default="192.168.50.89",
+        default="192.168.50.66",
         help="(quest_rokoko only) IP of the Meta Quest headset",
     )
     parser.add_argument(
         "--local-ip",
         type=str,
-        default="192.168.50.178",
+        default="192.168.50.135",
         help="(quest_rokoko only) Local machine IP address",
     )
     parser.add_argument(
