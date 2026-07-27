@@ -29,6 +29,11 @@ import robocasa
 import robocasa.macros as macros
 from robocasa.models.fixtures import FixtureType
 from robocasa.utils.robomimic.robomimic_dataset_utils import convert_to_robomimic_format
+from robocasa.utils.robot_utils import (
+    get_controller_config,
+    get_null_action,
+    resolve_robot_names,
+)
 
 
 def is_empty_input_spacemouse(action_dict):
@@ -99,13 +104,15 @@ def collect_human_trajectory(
         for robot in env.robots
     ]
 
-    zero_action = np.zeros(env.action_dim)
+    # action that holds the robot in place, which is not the same as a zero action when the arm
+    # controller takes absolute inputs (eg joint position control)
+    hold_action = get_null_action(env.unwrapped if hasattr(env, "unwrapped") else env)
     for _ in range(1):
         # do a dummy step thru base env to initalize things, but don't record the step
         if isinstance(env, DataCollectionWrapper):
-            env.env.step(zero_action)
+            env.env.step(hold_action)
         else:
-            env.step(zero_action)
+            env.step(hold_action)
 
     discard_traj = False
 
@@ -351,8 +358,9 @@ if __name__ == "__main__":
         "--robots",
         nargs="+",
         type=str,
-        default="PandaOmron",
-        help="Which robot(s) to use in the env",
+        default="xarm6_leap",
+        help="Which robot(s) to use in the env. Kitchen envs accept the short names "
+        "'panda', 'panda_leap', 'xarm6' and 'xarm6_leap' (see robocasa/utils/robot_utils.py)",
     )
     parser.add_argument(
         "--config",
@@ -385,7 +393,17 @@ if __name__ == "__main__":
         "--controller",
         type=str,
         default=None,
-        help="Choice of controller. Can be, eg. 'NONE' or 'WHOLE_BODY_IK', etc. Or path to controller json file",
+        help="Choice of controller. Can be, eg. 'NONE' or 'WHOLE_BODY_IK', etc. Or path to controller json file. "
+        "Takes precedence over --control_mode",
+    )
+    parser.add_argument(
+        "--control_mode",
+        type=str,
+        default="auto",
+        choices=["auto", "osc", "joint_pos"],
+        help="Which action space to record demos in. 'joint_pos' records absolute joint targets "
+        "(preferred for sim2real), 'osc' records Cartesian deltas. 'auto' picks joint_pos for "
+        "devices that solve IK themselves (quest_rokoko) and osc for the rest",
     )
     parser.add_argument(
         "--device",
@@ -453,12 +471,28 @@ if __name__ == "__main__":
     parser.add_argument("--generative_textures", action="store_true")
     args = parser.parse_args()
 
+    # Expand robot short names (eg "xarm6" -> "XArm6Omron") so the controller config, the env and
+    # the recorded env_info all refer to the same robot
+    args.robots = resolve_robot_names(args.robots)
+
     # Get controller config
     # controller_config = load_controller_config(default_controller=args.controller)
-    controller_config = load_composite_controller_config(
-        controller=args.controller,
-        robot=args.robots if isinstance(args.robots, str) else args.robots[0],
-    )
+    robot = args.robots if isinstance(args.robots, str) else args.robots[0]
+    if args.controller is not None:
+        # explicit controller wins over --control_mode
+        controller_config = load_composite_controller_config(
+            controller=args.controller,
+            robot=robot,
+        )
+    else:
+        control_mode = args.control_mode
+        if control_mode == "auto":
+            # joint position control is what we replay on hardware, so use it whenever the teleop
+            # device produces joint targets. The spacemouse / keyboard only produce Cartesian
+            # deltas, so those fall back to OSC.
+            control_mode = "joint_pos" if args.device == "quest_rokoko" else "osc"
+        print(colored(f"Using {control_mode} control for {robot}", "green"))
+        controller_config = get_controller_config(robot, control_mode=control_mode)
 
     if controller_config["type"] == "WHOLE_BODY_MINK_IK":
         # mink-speicific import. requires installing mink

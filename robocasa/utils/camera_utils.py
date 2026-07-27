@@ -100,6 +100,23 @@ CAM_CONFIGS = dict(
             parent_body="robot0_right_hand",
         )
     ),
+    # The xArm mounts are the Panda ones transformed into the xArm tool frame, evaluated at the
+    # kitchen spawn pose, so each camera looks at its gripper the same way its Panda counterpart
+    # does. Retune if the physical camera bracket differs.
+    XArm6Omron=dict(
+        robot0_eye_in_hand=dict(
+            pos=[0.05, 0.0, 0.05],
+            quat=[0.0, 0.707107, 0.707107, 0.0],
+            parent_body="robot0_right_hand",
+        )
+    ),
+    XArm6DexLeapRHOmron=dict(
+        robot0_eye_in_hand=dict(
+            pos=[0.059, -0.026, 0.053],
+            quat=[0.175, -0.313, 0.797, -0.486],
+            parent_body="robot0_right_hand",
+        )
+    ),
 )
 
 

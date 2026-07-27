@@ -18,9 +18,6 @@ from robosuite.utils.observables import Observable, sensor
 from robosuite.environments.base import EnvMeta
 from scipy.spatial.transform import Rotation
 
-from robosuite.models.robots import PandaOmron
-from robosuite.models.robots.compositional import PandaDexLeapRHOmron
-
 import robocasa
 import robocasa.macros as macros
 import robocasa.utils.camera_utils as CamUtils
@@ -42,6 +39,11 @@ from robocasa.utils.texture_swap import (
     replace_wall_texture,
 )
 from robocasa.utils.config_utils import refactor_composite_controller_config
+from robocasa.utils.robot_utils import (
+    get_null_action,
+    get_robot_config,
+    resolve_robot_names,
+)
 
 
 REGISTERED_KITCHEN_ENVS = {}
@@ -278,10 +280,9 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         if isinstance(robots, str):
             robots = [robots]
 
-        # backward compatibility: rename all robots that were previously called PandaMobile -> PandaOmron
-        for i in range(len(robots)):
-            if robots[i] == "PandaMobile":
-                robots[i] = "PandaOmron"
+        # expand short names (eg "xarm6" -> "XArm6Omron"), which also handles the robots that
+        # were renamed in robosuite v1.5 (eg "PandaMobile" -> "PandaOmron")
+        robots = resolve_robot_names(robots)
         assert len(robots) == 1
 
         # intialize cameras
@@ -298,12 +299,14 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             controller_configs = refactor_composite_controller_config(
                 controller_configs, robots[0], arms
             )
-            if robots[0] in ("PandaOmron", "PandaDexLeapRHOmron"):
+            robot_config = get_robot_config(robots[0])
+            if robot_config is not None:
+                # pin the action vector layout so it does not depend on the embodiment
                 if "composite_controller_specific_configs" not in controller_configs:
                     controller_configs["composite_controller_specific_configs"] = {}
                 controller_configs["composite_controller_specific_configs"][
                     "body_part_ordering"
-                ] = ["right", "right_gripper", "base", "torso"]
+                ] = robot_config["body_part_ordering"]
 
         super().__init__(
             robots=robots,
@@ -340,38 +343,11 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         super()._load_model()
 
         for robot in self.robots:
-            if isinstance(robot.robot_model, PandaDexLeapRHOmron):
-                # Dataset-derived arm pose (avg at 0.7s, j6 set to 1.0 for wrist-down).
-                # More retracted than PandaOmron default to prevent the larger
-                # LEAP hand from clipping into counter-mounted fixtures on spawn.
-                robot.init_qpos = (
-                    # -0.02871603,
-                    # -1.59282577,
-                    # -0.08036078,
-                    # -2.56806231,
-                    # 0.16381425,
-                    # 1.0,
-                    # 0.58635169,
-                    -0.01612974,
-                    -1.03446714,
-                    -0.02397936,
-                    -2.27550888,
-                    0.03932365,
-                    1.51639493,
-                    0.69615947,
-                )
-                robot.init_torso_qpos = np.array([0.0])
-            elif isinstance(robot.robot_model, PandaOmron):
-                robot.init_qpos = (
-                    -0.01612974,
-                    -1.03446714,
-                    -0.02397936,
-                    -2.27550888,
-                    0.03932365,
-                    1.51639493,
-                    0.69615947,
-                )
-                robot.init_torso_qpos = np.array([0.0])
+            # apply the kitchen-specific spawn pose for this embodiment (see robot_utils)
+            robot_config = get_robot_config(robot.robot_model)
+            if robot_config is not None:
+                robot.init_qpos = robot_config["init_qpos"]
+                robot.init_torso_qpos = robot_config["init_torso_qpos"]
 
         # determine sample layout and style
         if "layout_id" in self._ep_meta and "style_id" in self._ep_meta:
@@ -916,8 +892,10 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                     np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
                 )
 
-        # step through a few timesteps to settle objects
-        action = np.zeros(self.action_spec[0].shape)  # apply empty action
+        # step through a few timesteps to settle objects. the action has to hold the robot in
+        # place rather than be all zeros, since zeros command joint angles of 0 for the arm
+        # controllers that take absolute inputs (eg joint position control)
+        action = get_null_action(self)
 
         # Since the env.step frequency is slower than the mjsim timestep frequency, the internal controller will output
         # multiple torque commands in between new high level action commands. Therefore, we need to denote via
