@@ -265,6 +265,9 @@ from robocasa.environments.kitchen.single_stage.kitchen_drawer import (
     CloseDrawer,
     OpenDrawer,
 )
+from robocasa.environments.kitchen.single_stage.kitchen_lamp import (
+    ScrewLightbulb,
+)
 from robocasa.environments.kitchen.single_stage.kitchen_microwave import (
     TurnOffMicrowave,
     TurnOnMicrowave,

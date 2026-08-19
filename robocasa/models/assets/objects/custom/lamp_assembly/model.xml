@@ -1,0 +1,120 @@
+<mujoco model="lamp_assembly">
+  <!--
+    Lamp base + light bulb, pre-mated, modeled as a single articulated object.
+
+    Visual meshes are the 3D print STLs for these parts (mm, already z-up with the base foot
+    and the bulb shell at -z, so they need no rotation - only the mm->m scale and a z offset
+    that puts the foot on the counter). They are used in preference to furniture-bench's
+    OBJs because those model the apriltag areas as recessed pockets, which render as holes
+    once the tag material is gone; the print parts have flat faces there instead. Using the
+    print geometry also keeps sim and any future real-world build in agreement.
+
+    Screwing is modeled with two joints on the bulb body - a hinge and a slide about the
+    socket axis - tied together by the <equality><joint> below, so turning the bulb is the
+    only way to drive it down. One full turn (2*pi) seats it by SCREW_DEPTH = 0.02 m:
+
+        slide = polycoef[1] * hinge,  polycoef[1] = -0.02 / -2*pi = 0.0031831
+
+    qpos starts at 0 (fully unscrewed, bulb standing 20 mm proud of its seated pose) and
+    the task is done at hinge = -2*pi. hinge frictionloss keeps the bulb from self-driving
+    down under its own weight (holding torque needed is only ~0.0019 Nm).
+
+    The base carries a female socket and the bulb's threaded shell screws down inside it, so
+    the two parts interleave by ~1 mm at the thread. Bulb/base contact is therefore excluded:
+    the equality already constrains the mating, and letting the meshes collide would only
+    fight it. That also lets the collision primitives stay simple - the base's socket tube is
+    modeled as a plain cylinder that the bulb passes straight through.
+
+    SCALING: MujocoXMLObject.set_scale scales geoms, meshes, bodies and sites, but it passes
+    scale_slide_joints=False, and the <equality> below sits outside the object body so it is
+    never visited. Both screw_slide's range and polycoef[1] are lengths and must be multiplied
+    by the object scale by hand - ScrewLightbulb._create_obj does this via scale_screw_joint().
+    The hinge range is an angle and correctly stays put. Instantiating this model at a scale
+    other than 1.0 WITHOUT that fixup desynchronizes the thread from the geometry.
+  -->
+  <asset>
+    <!-- STLs are in mm. RoboCasa multiplies this scale by the ObjCat scale (1.0 here). -->
+    <mesh file="visual/lamp_base.stl" name="lamp_base_vis" scale="0.001 0.001 0.001"/>
+    <mesh file="visual/lamp_bulb.stl" name="lamp_bulb_vis" scale="0.001 0.001 0.001"/>
+    <!-- Material names deliberately do NOT start with the object name. add_prefix skips any
+         value that already begins with the prefix, so naming these "lamp_*" would make the
+         compiled name depend on what the task calls the object.
+
+         Appearance randomization drives rgba plus specular/shininess/reflectance (matte vs
+         glossy). Image textures are deliberately not used: these STLs carry no UVs, so a
+         texture maps to the raw triangulation and reads as blotches rather than a surface. -->
+    <material name="base_mat" rgba="0.32 0.33 0.36 1" specular="0.6" shininess="0.55"/>
+    <material name="bulb_mat" rgba="0.86 0.90 0.93 0.62" specular="0.9" shininess="0.9"/>
+  </asset>
+
+  <worldbody>
+    <body>
+      <!-- ===== lamp base: free joint gets added here by MJCFObject ===== -->
+      <body name="object">
+        <!-- explicit inertial: RoboCasa overwrites per-geom density, and we want the base
+             heavy enough that screwing torque does not spin it on the counter -->
+        <inertial pos="0 0 -0.005" mass="0.60" diaginertia="0.0006 0.0006 0.0008"/>
+
+        <!-- mesh spans z -35..+28 mm about its own origin; shift so the foot sits at
+             -0.0172 and the socket neck tip at +0.0458, matching the collision geoms -->
+        <geom name="base_vis" type="mesh" mesh="lamp_base_vis" material="base_mat"
+              pos="0 0 0.0178" group="1" contype="0" conaffinity="0"/>
+
+        <!-- Collision stack, matching the print profile bottom to top: square plinth, square
+             pyramid, round cone, the socket tube the bulb screws down into, and the square
+             rim at the top. The bulb shell passes through the socket tube, which is fine -
+             bulb/base contact is excluded below, and the screw equality does the mating. -->
+        <geom name="base_foot_coll" type="box" size="0.0424 0.0424 0.005" pos="0 0 -0.0122" group="0" rgba="0.8 0.8 0.8 0"/>
+        <geom name="base_pyramid_coll" type="box" size="0.036 0.036 0.006" pos="0 0 -0.0012" group="0" rgba="0.8 0.8 0.8 0"/>
+        <geom name="base_cone_coll" type="cylinder" size="0.024 0.00525" pos="0 0 0.01005" group="0" rgba="0.8 0.8 0.8 0"/>
+        <geom name="base_socket_coll" type="cylinder" size="0.018 0.012" pos="0 0 0.027" group="0" rgba="0.8 0.8 0.8 0"/>
+        <geom name="base_rim_coll" type="box" size="0.0276 0.0276 0.0025" pos="0 0 0.0433" group="0" rgba="0.8 0.8 0.8 0"/>
+
+        <!-- ===== light bulb: seated pose is z=0.0678, so it starts 0.02 m proud ===== -->
+        <body name="bulb" pos="0 0 0.0878">
+          <joint name="screw_hinge" type="hinge" axis="0 0 1" limited="true" range="-6.2831853 0"
+                 damping="0.02" frictionloss="0.03" armature="0.0001"/>
+          <!-- the slide is driven entirely by the equality below; its frictionloss is what
+               stops the bulb creeping down under its own weight over a long episode. It
+               barely resists screwing: referred to the hinge it is only pitch*1.0 Nm. -->
+          <joint name="screw_slide" type="slide" axis="0 0 1" limited="true" range="-0.02 0"
+                 damping="0.05" frictionloss="1.0" armature="0.0001"/>
+
+          <inertial pos="0 0 0.02" mass="0.06" diaginertia="4e-5 4e-5 2e-5"/>
+
+          <!-- mesh spans z -91..+30 mm; shift so the shell bottom lands at -0.053 and the
+               glass tip at +0.068, matching the collision geoms below -->
+          <geom name="bulb_vis" type="mesh" mesh="lamp_bulb_vis" material="bulb_mat"
+                pos="0 0 0.038" group="1" contype="0" conaffinity="0"/>
+
+          <!-- collision: threaded shell, collar, glass neck, glass envelope -->
+          <geom name="bulb_shell_coll" type="cylinder" size="0.0122 0.01875" pos="0 0 -0.03425" group="0" rgba="0.8 0.8 0.8 0"/>
+          <geom name="bulb_collar_coll" type="cylinder" size="0.0224 0.0027" pos="0 0 -0.0153" group="0" rgba="0.8 0.8 0.8 0"/>
+          <geom name="bulb_neck_coll" type="cylinder" size="0.0200 0.0055" pos="0 0 0.0155" group="0" rgba="0.8 0.8 0.8 0"/>
+          <geom name="bulb_glass_coll" type="sphere" size="0.0285" pos="0 0 0.0395" group="0" rgba="0.8 0.8 0.8 0"/>
+
+          <!-- grasp reference for scripted policies / success checks -->
+          <site name="bulb_center" pos="0 0 0.0395" size="0.004" rgba="1 0 0 0"/>
+        </body>
+      </body>
+
+      <site rgba="0 0 0 0" size="0.005" pos="0 0 -0.0172" name="bottom_site"/>
+      <site rgba="0 0 0 0" size="0.005" pos="0 0 0.1558" name="top_site"/>
+      <site rgba="0 0 0 0" size="0.005" pos="0.0424 0.0424 0" name="horizontal_radius_site"/>
+    </body>
+  </worldbody>
+
+  <equality>
+    <!-- Stiff on purpose. Softer settings let the bulb sag ~0.5 mm on the thread at reset and
+         drift ~0.3 mm over a turn; this holds the coupling to under 10 um. solref's time
+         constant stays >= 2*timestep (0.002 s) to keep the solver stable. -->
+    <joint joint1="screw_slide" joint2="screw_hinge" polycoef="0 0.0031831 0 0 0"
+           solimp="0.9999 0.99999 0.0001" solref="0.004 1"/>
+  </equality>
+
+  <contact>
+    <!-- body1 is "main", not "object": MujocoXMLObject renames the top-level object body to
+         "main" before the object name prefix is applied, so this resolves to <name>_main. -->
+    <exclude body1="main" body2="bulb"/>
+  </contact>
+</mujoco>

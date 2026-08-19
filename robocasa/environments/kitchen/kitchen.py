@@ -3,6 +3,7 @@ import random
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 
+import mujoco
 import numpy as np
 import robosuite.utils.transform_utils as T
 from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
@@ -480,6 +481,24 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             return
         self.object_placements = object_placements
 
+    def _merge_object_model(self, model):
+        """
+        Merges an object model into the task.
+
+        Task.merge_objects only takes the object's body and its assets, so anything an
+        object declares at the top level of its xml would be silently dropped. Articulated
+        objects need those: the lamp assembly's screw joint is a joint-to-joint <equality>,
+        and it excludes bulb/base contact so the shell does not fight the constraint.
+
+        Args:
+            model (MujocoObject): object model to merge
+        """
+        self.model.merge_objects([model])
+        for elem in model.equality:
+            self.model.equality.append(elem)
+        for elem in model.contact:
+            self.model.contact.append(elem)
+
     def _create_objects(self):
         """
         Creates and places objects in the kitchen environment.
@@ -495,7 +514,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                 model, info = self._create_obj(cfg)
                 cfg["info"] = info
                 self.objects[model.name] = model
-                self.model.merge_objects([model])
+                self._merge_object_model(model)
         else:
             self.object_cfgs = self._get_obj_cfgs()
             addl_obj_cfgs = []
@@ -506,7 +525,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                 model, info = self._create_obj(cfg)
                 cfg["info"] = info
                 self.objects[model.name] = model
-                self.model.merge_objects([model])
+                self._merge_object_model(model)
 
                 try_to_place_in = cfg["placement"].get("try_to_place_in", None)
 
@@ -531,7 +550,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                     model, info = self._create_obj(container_cfg)
                     container_cfg["info"] = info
                     self.objects[model.name] = model
-                    self.model.merge_objects([model])
+                    self._merge_object_model(model)
 
                     # modify object config to lie inside of container
                     cfg["placement"] = dict(
@@ -874,6 +893,26 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
 
         return placement_initializer
 
+    def _get_obj_root_joint(self, obj):
+        """
+        Gets the free joint that positions @obj in the world.
+
+        Most objects have exactly one joint, but articulated objects (eg the lamp assembly,
+        whose bulb rides a screw joint) declare their own joints inside nested bodies, and
+        those come first in the xml. Pick the free joint by type instead of by position.
+
+        Args:
+            obj (MujocoObject): object to look up
+
+        Returns:
+            str: name of the object's free joint
+        """
+        for joint in obj.joints:
+            joint_id = self.sim.model.joint_name2id(joint)
+            if self.sim.model.jnt_type[joint_id] == mujoco.mjtJoint.mjJNT_FREE:
+                return joint
+        return obj.joints[0]
+
     def _reset_internal(self):
         """
         Resets simulation internal configurations.
@@ -888,7 +927,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             # Loop through all objects and reset their positions
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(
-                    obj.joints[0],
+                    self._get_obj_root_joint(obj),
                     np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
                 )
 

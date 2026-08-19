@@ -768,6 +768,27 @@ OBJ_CATEGORIES = dict(
             scale=1.10,
         ),
     ),
+    lamp_assembly=dict(
+        # table lamp with a light bulb already mated to its socket. Unlike every other entry
+        # here this model is articulated: the bulb turns on a screw joint (see its model.xml).
+        # It must stay at scale 1.0 - scaling geoms would not scale the screw pitch.
+        # Deliberately given its own type rather than "decoration": tasks like CandleCleanup
+        # and DateNight sample that group and must not draw an articulated lamp.
+        types=("lamp"),
+        graspable=False,
+        washable=False,
+        microwavable=False,
+        cookable=False,
+        freezable=False,
+        objaverse=dict(
+            model_folders=["custom/lamp_assembly"],
+            scale=1.0,
+            # grippy glass so the fingers can drive the screw; masses come from the
+            # <inertial> tags in the model, which per-geom density does not override
+            friction=(1.2, 0.05, 0.02),
+            density=500,
+        ),
+    ),
     lemon=dict(
         types=("vegetable"),
         graspable=True,

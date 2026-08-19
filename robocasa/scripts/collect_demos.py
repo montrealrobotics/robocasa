@@ -11,6 +11,7 @@ from copy import deepcopy
 import datetime
 import json
 import os
+import sys
 import time
 from glob import glob
 
@@ -406,6 +407,14 @@ if __name__ == "__main__":
         "devices that solve IK themselves (quest_rokoko) and osc for the rest",
     )
     parser.add_argument(
+        "--control_freq",
+        type=int,
+        default=20,
+        help="Environment control frequency (Hz). Use 30 for quest_rokoko to match the rate the "
+        "real DexCap teleop server emits and logs actions at, so sim and real trajectories are "
+        "sampled identically.",
+    )
+    parser.add_argument(
         "--device",
         type=str,
         default="spacemouse",
@@ -494,6 +503,12 @@ if __name__ == "__main__":
         print(colored(f"Using {control_mode} control for {robot}", "green"))
         controller_config = get_controller_config(robot, control_mode=control_mode)
 
+    # Match the real DexCap teleop server's 30 Hz command/logging rate unless told otherwise, so
+    # sim and real trajectories are sampled at the same interval.
+    if args.device == "quest_rokoko" and "--control_freq" not in sys.argv:
+        args.control_freq = 30
+        print(colored("Using control_freq=30 to match the real teleop server", "green"))
+
     if controller_config["type"] == "WHOLE_BODY_MINK_IK":
         # mink-speicific import. requires installing mink
         from robosuite.examples.third_party_controller.mink_controller import (
@@ -570,7 +585,7 @@ if __name__ == "__main__":
         render_camera=args.camera,
         ignore_done=True,
         use_camera_obs=False,
-        control_freq=20,
+        control_freq=args.control_freq,
         renderer=args.renderer,
     )
 
