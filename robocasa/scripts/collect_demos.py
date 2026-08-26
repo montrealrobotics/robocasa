@@ -29,6 +29,11 @@ from termcolor import colored
 import robocasa
 import robocasa.macros as macros
 from robocasa.models.fixtures import FixtureType
+from robocasa.utils.episode_control import (
+    RETRY,
+    EpisodeKeyListener,
+    EpisodeRepeatWrapper,
+)
 from robocasa.utils.robomimic.robomimic_dataset_utils import convert_to_robomimic_format
 from robocasa.utils.robot_utils import (
     get_controller_config,
@@ -59,6 +64,8 @@ def collect_human_trajectory(
     render=True,
     max_fr=None,
     print_info=True,
+    key_listener=None,
+    repeat_episode=False,
 ):
     """
     Use the device (keyboard or SpaceNav 3D mouse) to collect a demonstration.
@@ -70,9 +77,24 @@ def collect_human_trajectory(
         device (Device): to receive controls from the device
         arms (str): which arm to control (eg bimanual) 'right' or 'left'
         env_configuration (str): specified environment configuration
+        key_listener (EpisodeKeyListener): if given, polled each step so the operator can
+            abort the episode from the keyboard
+        repeat_episode (bool): if True, rebuild the episode from the previous call instead
+            of sampling a new one, so a botched attempt can be retried on the same scene
+
+    Returns:
+        str: directory the episode was recorded to, or None
+        bool: whether the episode should be discarded
+        bool: whether the next call should repeat this same episode
     """
 
+    if repeat_episode and hasattr(env, "repeat_next_episode"):
+        env.repeat_next_episode()
     env.reset()
+
+    if key_listener is not None:
+        # drop presses made while the previous episode was wrapping up
+        key_listener.clear()
 
     ep_meta = env.get_ep_meta()
     # print(json.dumps(ep_meta, indent=4))
@@ -116,10 +138,23 @@ def collect_human_trajectory(
             env.step(hold_action)
 
     discard_traj = False
+    repeat_next = False
 
     # Loop until we get a reset from the input or the task completes
     while True:
         start = time.time()
+
+        # operator abort takes priority over anything the teleop device reports
+        if key_listener is not None:
+            request = key_listener.take_request()
+            if request is not None:
+                discard_traj = True
+                if request == RETRY:
+                    repeat_next = True
+                    print(colored("Retrying this episode (not saved)", "yellow"))
+                else:
+                    print(colored("Skipping to a new episode (not saved)", "yellow"))
+                break
 
         # Set active robot
         active_robot = env.robots[device.active_robot]
@@ -205,7 +240,7 @@ def collect_human_trajectory(
     # cleanup for end of data collection episodes
     env.close()
 
-    return ep_directory, discard_traj
+    return ep_directory, discard_traj, repeat_next
 
 
 def gather_demonstrations_as_hdf5(directory, out_dir, env_info, excluded_episodes=None):
@@ -437,7 +472,7 @@ if __name__ == "__main__":
     parser.add_argument(
         "--vr-ip",
         type=str,
-        default="192.168.50.66",
+        default="192.168.50.17",
         help="(quest_rokoko only) IP of the Meta Quest headset",
     )
     parser.add_argument(
@@ -464,6 +499,56 @@ if __name__ == "__main__":
         default=12345,
         help="(quest_rokoko only) UDP port to send IK results back to Quest",
     )
+    parser.add_argument(
+        "--quest-auto-calibrate",
+        action="store_true",
+        help="(quest_rokoko only) Use the first RHand pose as a local reference when the Quest app does not send WorldFrame",
+    )
+    parser.add_argument(
+        "--thumb-root-offset",
+        type=float,
+        nargs=3,
+        metavar=("X", "Y", "Z"),
+        default=(0.0, 0.0, 0.0),
+        help="(quest_rokoko only) Thumb-chain translation in metres in the calibrated Rokoko wrist frame",
+    )
+    parser.add_argument(
+        "--finger-anchor-retargeting",
+        action="store_true",
+        help=(
+            "(quest_rokoko only) Map each Rokoko fingertip from its proximal joint to the matching LEAP MCP origin, "
+            "rather than from the wrist frame"
+        ),
+    )
+    parser.add_argument(
+        "--segment-level-retargeting",
+        action="store_true",
+        help=(
+            "(quest_rokoko only) Normalize Rokoko phalanx lengths and jointly target intermediate LEAP links. "
+            "Implies --finger-anchor-retargeting"
+        ),
+    )
+    parser.add_argument(
+        "--segment-length-scales",
+        type=float,
+        nargs=12,
+        metavar=(
+            "T1",
+            "T2",
+            "T3",
+            "I1",
+            "I2",
+            "I3",
+            "M1",
+            "M2",
+            "M3",
+            "R1",
+            "R2",
+            "R3",
+        ),
+        default=(1.0,) * 12,
+        help="(quest_rokoko only) Extra segment scales, thumb/index/middle/ring and proximal-to-tip (default: all 1)",
+    )
 
     parser.add_argument("--debug", action="store_true")
     parser.add_argument(
@@ -478,6 +563,34 @@ if __name__ == "__main__":
         "--style", type=int, nargs="+", default=[0, 1, 2, 3, 4, 5, 6, 7, 8, 11]
     )
     parser.add_argument("--generative_textures", action="store_true")
+    parser.add_argument(
+        "--skip-key",
+        type=str,
+        default="f9",
+        help="Key that discards the episode in progress and samples a new one. Single "
+        "character or a pynput key name. The listener is global, so prefer keys nothing "
+        "else is bound to.",
+    )
+    parser.add_argument(
+        "--retry-key",
+        type=str,
+        default="f10",
+        help="Key that discards the episode in progress and retries the SAME one, with the "
+        "layout, style and object placements unchanged.",
+    )
+    parser.add_argument(
+        "--no-episode-keys",
+        action="store_true",
+        help="Disable the skip/retry keyboard listener.",
+    )
+    parser.add_argument(
+        "--env_kwargs",
+        type=str,
+        default=None,
+        help="JSON dict of extra keyword arguments to forward to the environment, eg "
+        '\'{"scale_range": [0.8, 1.2], "randomize_appearance": true}\'. These are folded '
+        "into env_info, so playback reconstructs the same environment.",
+    )
     args = parser.parse_args()
 
     # Expand robot short names (eg "xarm6" -> "XArm6Omron") so the controller config, the env and
@@ -563,6 +676,11 @@ if __name__ == "__main__":
         # config["obj_instance_split"] = None
         # config["obj_registries"] = ("aigen",)
 
+    # Task-specific environment options. Applied last so they can override the defaults set
+    # above, and folded into env_info below so playback rebuilds the same env.
+    if args.env_kwargs is not None:
+        config.update(json.loads(args.env_kwargs))
+
     # Automatically un-nest single cameras or enforce OpenCV for multiple cameras
     if isinstance(args.camera, list):
         if len(args.camera) == 1:
@@ -592,11 +710,20 @@ if __name__ == "__main__":
     # Wrap this with visualization wrapper
     env = VisualizationWrapper(env)
 
-    # Grab reference to controller config and convert it to json-encoded string
-    env_info = json.dumps(config)
+    # Grab reference to controller config and convert it to json-encoded string.
+    # control_freq is added here rather than to `config` above because it is passed
+    # to robosuite.make() explicitly; without folding it in, the recorded env_info
+    # omits it and any later replay silently falls back to the Kitchen default.
+    config_for_env_info = dict(config)
+    config_for_env_info["control_freq"] = args.control_freq
+    env_info = json.dumps(config_for_env_info)
 
     t_now = time.time()
     time_str = datetime.datetime.fromtimestamp(t_now).strftime("%Y-%m-%d-%H-%M-%S")
+
+    # lets an episode be reproduced on request; must sit *under* DataCollectionWrapper,
+    # whose reset() unsets the episode meta on the env it wraps
+    env = EpisodeRepeatWrapper(env)
 
     if not args.debug:
         # wrap the environment with data collection wrapper
@@ -628,26 +755,40 @@ if __name__ == "__main__":
         device = QuestRokoko(
             env=env,
             vr_ip=args.vr_ip,
-            local_ip=args.local_ip,
             pose_cmd_port=args.pose_cmd_port,
             ik_result_port=args.ik_result_port,
             rokoko_port=args.rokoko_port,
             pos_sensitivity=args.pos_sensitivity,
             rot_sensitivity=args.rot_sensitivity,
+            auto_calibrate_on_first_wrist=args.quest_auto_calibrate,
+            thumb_root_offset=args.thumb_root_offset,
+            finger_anchor_retargeting=args.finger_anchor_retargeting,
+            segment_level_retargeting=args.segment_level_retargeting,
+            segment_length_scales=args.segment_length_scales,
         )
     else:
         raise ValueError
+
+    # keyboard control over the episode in progress (skip / retry)
+    key_listener = None
+    if not args.no_episode_keys:
+        key_listener = EpisodeKeyListener(
+            skip_key=args.skip_key, retry_key=args.retry_key
+        )
+        if not key_listener.start():
+            key_listener = None
 
     # make a new timestamped directory
     new_dir = os.path.join(args.directory, time_str)
     os.makedirs(new_dir)
 
     excluded_eps = []
+    repeat_episode = False
 
     # collect demonstrations
     while True:
         print()
-        ep_directory, discard_traj = collect_human_trajectory(
+        ep_directory, discard_traj, repeat_episode = collect_human_trajectory(
             env,
             device,
             args.arm,
@@ -655,6 +796,8 @@ if __name__ == "__main__":
             mirror_actions,
             render=(args.renderer != "mjviewer"),
             max_fr=args.max_fr,
+            key_listener=key_listener,
+            repeat_episode=repeat_episode,
         )
 
         print("Keep traj?", not discard_traj)

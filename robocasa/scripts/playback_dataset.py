@@ -2,6 +2,7 @@ import argparse
 import json
 import os
 import random
+from copy import deepcopy
 import time
 
 import h5py
@@ -50,6 +51,7 @@ def playback_trajectory_with_env(
     verbose=False,
     camera_height=512,
     camera_width=512,
+    skip_model_and_state=False,
 ):
     """
     Helper function to playback a single trajectory using the simulator environment.
@@ -67,6 +69,11 @@ def playback_trajectory_with_env(
         camera_names (list): determines which camera(s) are used for rendering. Pass more than
             one to output a video with multiple camera views concatenated horizontally.
         first (bool): if True, only use the first frame of each episode.
+        skip_model_and_state (bool): only for replaying with a swapped robot, whose geoms and
+            joint dimensions do not match the recorded ones. Leave False otherwise: without
+            the dataset's model and initial state the scene is rebuilt from scratch and the
+            object placements are re-sampled, so replayed actions reach for objects that are
+            no longer where they were recorded.
     """
     write_video = video_writer is not None
     video_count = 0
@@ -84,7 +91,7 @@ def playback_trajectory_with_env(
         if lang is not None:
             print(colored(f"Instruction: {lang}", "green"))
         print(colored("Spawning environment...", "yellow"))
-    reset_to(env, initial_state, skip_model_and_state=True)
+    reset_to(env, initial_state, skip_model_and_state=skip_model_and_state)
 
     traj_len = states.shape[0]
     action_playback = actions is not None
@@ -195,6 +202,11 @@ def playback_trajectory_with_obs(
         image_names (list): determines which image observations are used for rendering. Pass more than
             one to output a video with multiple image observations concatenated horizontally.
         first (bool): if True, only use the first frame of each episode.
+        skip_model_and_state (bool): only for replaying with a swapped robot, whose geoms and
+            joint dimensions do not match the recorded ones. Leave False otherwise: without
+            the dataset's model and initial state the scene is rebuilt from scratch and the
+            object placements are re-sampled, so replayed actions reach for objects that are
+            no longer where they were recorded.
     """
     assert (
         image_names is not None
@@ -447,6 +459,8 @@ def playback_dataset(args):
                 "control_delta"
             ] = False  # absolute action space
 
+        dataset_robots = deepcopy(env_meta["env_kwargs"].get("robots"))
+
         env_kwargs = env_meta["env_kwargs"]
         env_kwargs["env_name"] = env_meta["env_name"]
         env_kwargs["has_renderer"] = False
@@ -459,6 +473,8 @@ def playback_dataset(args):
             env_kwargs["layout_and_style_ids"] = None
             env_kwargs["style_ids"] = style_ids
             env_kwargs.pop("layout_ids", None)
+
+        robot_swapped = env_kwargs.get("robots") != dataset_robots
 
         if args.verbose:
             print(
@@ -491,9 +507,18 @@ def playback_dataset(args):
         demos = demos[: args.n]
 
     # maybe dump video
+    # Play back at the rate the demos were recorded at. env_meta is only bound on
+    # some branches above, and older datasets predate control_freq being stored in
+    # env_args, so read it defensively and fall back to the Kitchen default.
+    try:
+        video_fps = get_env_metadata_from_dataset(dataset_path=args.dataset)[
+            "env_kwargs"
+        ].get("control_freq", 20)
+    except Exception:
+        video_fps = 20
     video_writer = None
     if write_video and style_ids is None:
-        video_writer = imageio.get_writer(args.video_path, fps=20)
+        video_writer = imageio.get_writer(args.video_path, fps=video_fps)
 
     for ind in range(len(demos)):
         ep = demos[ind]
@@ -589,7 +614,7 @@ def playback_dataset(args):
                         else "mp4"
                     )
                     style_video_path = f"{base}_{ep}_style{sid}_{style_label}.{ext}"
-                    vw = imageio.get_writer(style_video_path, fps=20)
+                    vw = imageio.get_writer(style_video_path, fps=video_fps)
 
                 playback_trajectory_with_env(
                     env=env,
@@ -604,6 +629,7 @@ def playback_dataset(args):
                     verbose=args.verbose,
                     camera_height=args.camera_height,
                     camera_width=args.camera_width,
+                    skip_model_and_state=robot_swapped,
                 )
 
                 if vw is not None:
@@ -624,6 +650,7 @@ def playback_dataset(args):
                 verbose=args.verbose,
                 camera_height=args.camera_height,
                 camera_width=args.camera_width,
+                skip_model_and_state=robot_swapped,
             )
 
     f.close()

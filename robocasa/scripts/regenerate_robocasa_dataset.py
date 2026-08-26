@@ -287,6 +287,13 @@ def main(args):
         env_kwargs["camera_widths"] = args.image_size
         env_kwargs["camera_heights"] = args.image_size
 
+        env_kwargs["control_freq"] = args.control_freq
+
+        if args.generative_textures:
+            env_kwargs["generative_textures"] = "100p"
+        if args.randomize_cameras:
+            env_kwargs["randomize_cameras"] = True
+
         # # Uncomment below to save the controller configs (might be needed for policy evaluation)
         # with open("robocasa_controller_configs.pkl", "wb") as f:
         #     pickle.dump(env_meta['env_kwargs']['controller_configs'], f)
@@ -310,6 +317,13 @@ def main(args):
             rel_path = os.path.basename(hdf5_file)
         else:
             rel_path = os.path.relpath(hdf5_file, args.dataset_path)
+        if args.generative_textures or args.randomize_cameras:
+            image_suffix = str(args.image_size)
+            if args.randomize_cameras:
+                image_suffix += "_randcams"
+            aug_prefix = "_gentex" if args.generative_textures else ""
+            rel_path = "{}{}_im{}.hdf5".format(rel_path[:-5], aug_prefix, image_suffix)
+
         new_data_path = os.path.join(args.target_dir, rel_path)
         os.makedirs(os.path.dirname(new_data_path), exist_ok=True)
 
@@ -326,6 +340,14 @@ def main(args):
 
         new_data_file = h5py.File(new_data_path, "w")
         grp = new_data_file.create_group("data")
+
+        # Record the env metadata actually used for the replay, so downstream
+        # consumers (and any future regeneration) can recover the control rate.
+        regen_env_meta = dict(env_meta)
+        regen_env_meta["env_kwargs"] = dict(env_meta["env_kwargs"])
+        regen_env_meta["env_kwargs"]["control_freq"] = args.control_freq
+        grp.attrs["env_args"] = json.dumps(regen_env_meta)
+        grp.attrs["control_freq"] = args.control_freq
 
         # List of all demonstration episodes (sorted in increasing number order)
         demos = list(orig_data_file["data"].keys())
@@ -703,7 +725,7 @@ def main(args):
                     video_out_subdir,
                     f"ep={global_episode_counter}--task={task_name_sanitized}--success={bool(success)}.mp4",
                 )
-                video_writer = imageio.get_writer(mp4_path, fps=30)
+                video_writer = imageio.get_writer(mp4_path, fps=args.control_freq)
                 for img_left, img_right, img_wrist in zip(
                     agentview_left_images, agentview_right_images, eye_in_hand_images
                 ):
@@ -864,6 +886,30 @@ if __name__ == "__main__":
         type=str,
         help="Path to directory containing raw HDF5 dataset. Example: ./robocasa/datasets/v0.1/single_stage/",
         required=True,
+    )
+    parser.add_argument(
+        "--generative_textures",
+        type=str2bool,
+        default=False,
+        help="Render with AI-generated kitchen textures (sets generative_textures='100p'). "
+        "Affects rendered images only, not the replayed physics.",
+    )
+    parser.add_argument(
+        "--randomize_cameras",
+        type=str2bool,
+        default=False,
+        help="Add gaussian noise to camera position/rotation on each reset. "
+        "Affects rendered images only, not the replayed physics.",
+    )
+    parser.add_argument(
+        "--control_freq",
+        type=int,
+        default=30,
+        help="Environment control frequency (Hz) used to replay the demos. Must match the rate "
+        "the source demos were collected at, otherwise each recorded action is integrated over a "
+        "different timestep and the replayed trajectory is retimed. collect_demos uses 30 for "
+        "quest_rokoko and 20 otherwise; control_freq is not stored in env_args, so it must be "
+        "supplied here.",
     )
     parser.add_argument(
         "--filename_pattern",
