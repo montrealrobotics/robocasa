@@ -23,6 +23,31 @@ LAMP_FINISHES = {
 }
 
 
+def set_screw_resistance(obj, frictionloss=None, damping=None):
+    """
+    Overrides how hard the bulb is to turn, without editing the asset.
+
+    Args:
+        obj (MJCFObject): lamp object
+
+        frictionloss (float): constant resisting torque on the screw hinge, in Nm. This is
+            the breakaway torque - the bulb does not move until the gripper applies more
+            than this, and it applies equally at any speed. The main "how stiff is it" knob.
+
+        damping (float): viscous resistance on the screw hinge, in Nm per rad/s. Resists
+            fast turning only, so it reads as turning through honey rather than as stiffness.
+    """
+    if frictionloss is None and damping is None:
+        return
+    hinge = obj.worldbody.find(
+        ".//joint[@name='{}screw_hinge']".format(obj.naming_prefix)
+    )
+    if frictionloss is not None:
+        hinge.set("frictionloss", str(frictionloss))
+    if damping is not None:
+        hinge.set("damping", str(damping))
+
+
 def scale_screw_joint(obj):
     """
     Applies the object's scale to the parts of the screw that RoboCasa's scaling misses.
@@ -76,6 +101,15 @@ class ScrewLightbulb(Kitchen):
 
         randomize_appearance (bool): if True, the lamp's materials get a fresh colour and
             surface finish (matte / satin / glossy) each episode.
+
+        fix_base (bool): if True, the lamp base is pinned to the counter once it has settled,
+            matching a real setup where the base is taped down. The bulb still turns freely.
+
+        screw_friction (float): overrides the screw hinge's frictionloss (Nm), ie how much
+            torque it takes to turn the bulb at all. None keeps the value in the asset.
+
+        screw_damping (float): overrides the screw hinge's damping (Nm per rad/s). None keeps
+            the value in the asset.
     """
 
     def __init__(
@@ -83,14 +117,21 @@ class ScrewLightbulb(Kitchen):
         turns_required=0.95,
         scale_range=None,
         randomize_appearance=False,
+        fix_base=True,
+        screw_friction=None,
+        screw_damping=None,
         *args,
         **kwargs
     ):
         self.turns_required = turns_required
         self.scale_range = scale_range
         self.randomize_appearance = randomize_appearance
+        self.fix_base = fix_base
+        self.screw_friction = screw_friction
+        self.screw_damping = screw_damping
         # set before super().__init__, which resets and can ask for ep meta
         self._lamp_appearance = None
+        self._needs_anchor = False
         super().__init__(*args, **kwargs)
 
     def _setup_kitchen_references(self):
@@ -130,16 +171,29 @@ class ScrewLightbulb(Kitchen):
         Returns:
             list: List of object configurations.
         """
+        # Anchor sampling to where the robot will actually stand. The counter is picked
+        # first and the robot is placed against it, but a counter can own several top geoms
+        # (an island is split around its sink), and get_reset_regions with a fixture ref
+        # picks the geom nearest that fixture - which on an island can be the far side,
+        # behind the sink and out of reach. compute_robot_base_placement_pose is
+        # deterministic and the robot is already placed by the time this runs, so the base
+        # position is known here and selects the reachable geom instead.
+        robot_base_pos, _ = self.compute_robot_base_placement_pose(
+            ref_fixture=self.get_fixture(self.init_robot_base_pos)
+        )
         cfg = dict(
             name="lamp",
             obj_groups="lamp_assembly",
             placement=dict(
                 fixture=self.counter,
                 sample_region_kwargs=dict(
-                    ref=self.counter,
+                    # plain list, not an array: this dict is serialized into ep_meta
+                    ref=[float(v) for v in robot_base_pos],
+                    loc="nn",
                 ),
                 size=(0.40, 0.40),
-                pos=(0, -0.6),
+                # x: line the sampling window up with the robot; y: bias to the near edge
+                pos=("ref", -0.6),
                 # the screw axis is vertical, so only yaw matters and the bulb is
                 # rotationally symmetric - but vary it so policies cannot memorize
                 rotation=(-np.pi / 6, np.pi / 6),
@@ -159,6 +213,11 @@ class ScrewLightbulb(Kitchen):
         obj, info = super()._create_obj(cfg)
         if cfg.get("name") == "lamp":
             scale_screw_joint(obj)
+            set_screw_resistance(
+                obj,
+                frictionloss=self.screw_friction,
+                damping=self.screw_damping,
+            )
         return obj, info
 
     @property
@@ -245,18 +304,89 @@ class ScrewLightbulb(Kitchen):
             model.mat_shininess[mat_id] = spec["shininess"]
             model.mat_reflectance[mat_id] = spec["reflectance"]
 
+    def _anchor_base(self):
+        """
+        Pins the lamp base where it currently stands, by activating the weld in the model and
+        writing the current pose into it.
+
+        The weld's relpose is the pose of the world in the welded body's frame, ie the
+        inverse of the body's world pose - not the pose itself. It has to be written at
+        runtime because the placement is only sampled once the scene is built, and it is
+        written after the settling steps so the lamp is pinned where it came to rest.
+        """
+        model = self.sim.model._model
+        data = self.sim.data._data
+        eq_id = mujoco.mj_name2id(
+            model,
+            mujoco.mjtObj.mjOBJ_EQUALITY,
+            self.objects["lamp"].naming_prefix + "base_anchor",
+        )
+        if eq_id == -1:
+            return
+
+        body_id = self.obj_body_id["lamp"]
+        neg_pos, neg_quat = np.zeros(3), np.zeros(4)
+        mujoco.mju_negPose(neg_pos, neg_quat, data.xpos[body_id], data.xquat[body_id])
+        model.eq_data[eq_id, 0:3] = 0.0
+        model.eq_data[eq_id, 3:6] = neg_pos
+        model.eq_data[eq_id, 6:10] = neg_quat
+        model.eq_data[eq_id, 10] = 1.0
+        data.eq_active[eq_id] = 1
+        self.sim.forward()
+
     def _reset_internal(self):
         """
         Resets simulation internal configurations, then re-skins the lamp if asked.
         """
         super()._reset_internal()
 
-        self._lamp_appearance = None
-        if self.randomize_appearance:
-            self._lamp_appearance = self._ep_meta.get("lamp_appearance")
-            if self._lamp_appearance is None:
-                self._lamp_appearance = self._sample_lamp_appearance()
+        # a recorded appearance is replayed even with randomization off, so playback of a
+        # demo looks like the episode it was collected from
+        self._lamp_appearance = self._ep_meta.get("lamp_appearance")
+        if self._lamp_appearance is None and self.randomize_appearance:
+            self._lamp_appearance = self._sample_lamp_appearance()
+        if self._lamp_appearance is not None:
             self._apply_lamp_appearance(self._lamp_appearance)
+
+        # Deferred to the first step rather than done here. DataCollectionWrapper follows
+        # reset() with _start_new_episode(), which recompiles the model from xml (clearing
+        # eq_active and eq_data), resets the sim and only then restores the recorded state -
+        # so anything pinned during reset is both wiped and pinned to the wrong pose.
+        self._needs_anchor = self.fix_base
+
+    @property
+    def lamp_scale(self):
+        """
+        Scale the lamp was instantiated at, so distance thresholds can track object size.
+
+        Returns:
+            float: uniform scale factor
+        """
+        return float(np.mean(self.objects["lamp"]._scale))
+
+    def gripper_bulb_far(self, th=0.15):
+        """
+        Args:
+            th (float): distance threshold at scale 1.0, in metres
+
+        Returns:
+            bool: True if the hand is clear of the bulb
+        """
+        bulb_pos = self.sim.data.site_xpos[
+            self.sim.model.site_name2id("lamp_bulb_center")
+        ]
+        eef_pos = self.sim.data.site_xpos[self.robots[0].eef_site_id["right"]]
+        return np.linalg.norm(eef_pos - bulb_pos) > th * self.lamp_scale
+
+    def step(self, action):
+        """
+        Pins the base on the first step of an episode, once the scene has stopped being
+        rebuilt underneath it.
+        """
+        if self._needs_anchor:
+            self._anchor_base()
+            self._needs_anchor = False
+        return super().step(action)
 
     def _check_success(self):
         """
@@ -264,5 +394,5 @@ class ScrewLightbulb(Kitchen):
         and the gripper has let go of it.
         """
         screwed_in = self.get_screw_state()["turns"] >= self.turns_required
-        gripper_obj_far = OU.gripper_obj_far(self, obj_name="lamp", th=0.15)
-        return screwed_in and gripper_obj_far
+        # return screwed_in and self.gripper_bulb_far()
+        return screwed_in

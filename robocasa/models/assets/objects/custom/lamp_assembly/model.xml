@@ -72,11 +72,19 @@
 
         <!-- ===== light bulb: seated pose is z=0.0678, so it starts 0.02 m proud ===== -->
         <body name="bulb" pos="0 0 0.0878">
+          <!-- armature is doing real work here, not just conditioning. The bulb's inertia
+               about this axis is only ~2e-5 kg m2, and on a DOF that light MuJoCo's friction
+               constraint cannot hold: with armature=1e-4 the bulb crept 44 deg in 5 s under a
+               torque of 0.02 Nm even with frictionloss set to 0.10, ie frictionloss did
+               nothing. At 5e-3 the same case gives 0.7 deg and frictionloss behaves as the
+               breakaway torque it is meant to be. Raise frictionloss to make screwing
+               stiffer; keep armature at least this high or it will have no effect. -->
           <joint name="screw_hinge" type="hinge" axis="0 0 1" limited="true" range="-6.2831853 0"
-                 damping="0.02" frictionloss="0.03" armature="0.0001"/>
-          <!-- the slide is driven entirely by the equality below; its frictionloss is what
-               stops the bulb creeping down under its own weight over a long episode. It
-               barely resists screwing: referred to the hinge it is only pitch*1.0 Nm. -->
+                 damping="0.02" frictionloss="0.10" armature="0.005"/>
+          <!-- The slide is driven entirely by the equality below, so it needs no tuning of
+               its own; what stops the bulb creeping down under its own weight is the hinge
+               frictionloss above. This frictionloss is kept only as headroom for a much
+               heavier bulb - measurably it changes nothing at the current mass. -->
           <joint name="screw_slide" type="slide" axis="0 0 1" limited="true" range="-0.02 0"
                  damping="0.05" frictionloss="1.0" armature="0.0001"/>
 
@@ -110,6 +118,13 @@
          constant stays >= 2*timestep (0.002 s) to keep the solver stable. -->
     <joint joint1="screw_slide" joint2="screw_hinge" polycoef="0 0.0031831 0 0 0"
            solimp="0.9999 0.99999 0.0001" solref="0.004 1"/>
+
+    <!-- Optional anchor pinning the base to the world, for the real-world setup where the
+         base is taped down. Inactive here: the task turns it on after reset and writes the
+         pose the lamp settled at into eq_data, since the placement is only known at runtime.
+         body1 is "main" for the same reason as the contact exclude above. -->
+    <weld name="base_anchor" body1="main" active="false"
+          solimp="0.9999 0.99999 0.001" solref="0.004 1"/>
   </equality>
 
   <contact>

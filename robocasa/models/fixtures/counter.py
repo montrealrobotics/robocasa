@@ -583,7 +583,10 @@ class Counter(ProcGenFixture):
         Args:
             env (Kitchen): the kitchen environment which contains this counter
 
-            ref (str): reference fixture used in determining sampling location
+            ref (str or Fixture or array-like): reference used in determining sampling
+                        location. Either a fixture (or its name), or a global [x, y, z]
+                        point - the latter lets a task anchor sampling to something that is
+                        not a fixture, such as the robot base.
 
             loc (str): sampling method, one of ["nn", "left", "right", "left_right", "any"]
                         nn: chooses the closest top geom to the reference fixture
@@ -622,19 +625,48 @@ class Counter(ProcGenFixture):
                 reset_regions[f"geom_{geom_i}"] = dict(size=size, offset=offset)
                 geom_i += 1
         else:
-            ref_fixture = env.get_fixture(ref)
+            ### resolve the reference into where it sits in this counter's frame, and where
+            ### each top geom sits relative to it ###
+            if isinstance(ref, (list, tuple, np.ndarray)):
+                # ref given as a global point rather than a fixture (eg the robot base, so a
+                # task can sample the part of a counter the robot can actually reach). A bare
+                # point carries no orientation, so offsets are taken in this counter's frame.
+                ref_point = np.asarray(ref, dtype=float).reshape(3)
+                ref_pos = get_fixture_to_point_rel_offset(self, ref_point)
+                fixture_to_geom_offsets = [
+                    s2a(g.get("pos")) - ref_pos for g in all_geoms
+                ]
+            else:
+                ref_fixture = env.get_fixture(ref)
+                ref_pos, _ = get_rel_transform(self, ref_fixture)
 
-            ### find an appropriate geom to sample ###
-            fixture_to_geom_offsets = []
-            for g in all_geoms:
-                g_pos = get_pos_after_rel_offset(self, s2a(g.get("pos")))
-                rel_offset = get_fixture_to_point_rel_offset(ref_fixture, g_pos)
-                fixture_to_geom_offsets.append(rel_offset)
+                ### find an appropriate geom to sample ###
+                fixture_to_geom_offsets = []
+                for g in all_geoms:
+                    g_pos = get_pos_after_rel_offset(self, s2a(g.get("pos")))
+                    rel_offset = get_fixture_to_point_rel_offset(ref_fixture, g_pos)
+                    fixture_to_geom_offsets.append(rel_offset)
 
             valid_geoms = []
 
             if loc == "nn":
-                dists = [np.linalg.norm(offset) for offset in fixture_to_geom_offsets]
+                if isinstance(ref, (list, tuple, np.ndarray)):
+                    # measure to the nearest point of each top geom rather than to its
+                    # centre. A long counter is split into several tops, and a reference
+                    # sitting in the gap between two of them is equidistant from both
+                    # centres while being right next to both edges.
+                    dists = []
+                    for g in all_geoms:
+                        g_pos = s2a(g.get("pos"))
+                        g_half = s2a(g.get("size"))
+                        delta = np.maximum(
+                            np.abs(ref_pos[:2] - g_pos[:2]) - g_half[:2], 0.0
+                        )
+                        dists.append(np.linalg.norm(delta))
+                else:
+                    dists = [
+                        np.linalg.norm(offset) for offset in fixture_to_geom_offsets
+                    ]
                 chosen_top = all_geoms[np.argmin(dists)]
                 valid_geoms.append(chosen_top)
             elif loc == "right":
@@ -664,7 +696,6 @@ class Counter(ProcGenFixture):
                 min_x = top_pos[0] - top_half_size[0]
                 max_x = top_pos[0] + top_half_size[0]
 
-                ref_pos, _ = get_rel_transform(self, ref_fixture)
                 if min_x <= ref_pos[0] <= max_x:
                     # restrict sample region to be below fixture
                     offset[0] = ref_pos[0]

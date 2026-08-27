@@ -771,11 +771,19 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                     if x_halfsize == 0.0:
                         inner_xpos = 0.0
                     else:
-                        ref_fixture = self.get_fixture(
-                            placement["sample_region_kwargs"]["ref"]
-                        )
-                        ref_pos = ref_fixture.pos
-                        fixture_to_ref = OU.get_rel_transform(fixture, ref_fixture)[0]
+                        region_ref = placement["sample_region_kwargs"]["ref"]
+                        if isinstance(region_ref, (list, tuple, np.ndarray)):
+                            # ref given as a global point (eg the robot base) rather than a
+                            # fixture, so the inner window can be aligned to something that
+                            # is not a fixture
+                            fixture_to_ref = OU.get_fixture_to_point_rel_offset(
+                                fixture, np.asarray(region_ref, dtype=float).reshape(3)
+                            )
+                        else:
+                            ref_fixture = self.get_fixture(region_ref)
+                            fixture_to_ref = OU.get_rel_transform(fixture, ref_fixture)[
+                                0
+                            ]
                         outer_to_ref = fixture_to_ref - reset_region["offset"]
                         inner_xpos = outer_to_ref[0] / x_halfsize
                         inner_xpos = np.clip(inner_xpos, a_min=-1.0, a_max=1.0)
