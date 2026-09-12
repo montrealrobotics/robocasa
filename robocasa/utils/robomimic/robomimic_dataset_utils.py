@@ -202,7 +202,7 @@ def move_demo_to_new_key(f, old_demo_key, new_demo_key, delete_old_demo=True):
 def make_demo_ids_contiguous(dataset):
     f = h5py.File(dataset, "a")  # edit mode
 
-    num_old_demos = max([int(demo_key.split("_")[-1]) for demo_key in f["data"]]) + 1
+    num_old_demos = max([int(demo_key.split("_")[1]) for demo_key in f["data"]]) + 1
     missing_demo_inds = [
         i for i in range(num_old_demos) if f"demo_{i}" not in f["data"]
     ]

@@ -79,8 +79,19 @@ class CoffeeMachine(Accessory):
         Args:
             env (MujocoEnv): The environment to check the state of the coffee machine in
         """
+        gripper = env.robots[0].gripper["right"]
+
+        # Robosuite check_contact automatically filters down to gripper.contact_geoms (group 0).
+        # LEAP hand fingertip meshes are assigned to group 1, meaning they are considered visual_geoms!
+        # Thus, we explicitly inject both lists of geoms to guarantee intersections are captured.
+        check_geoms = getattr(gripper, "contact_geoms", []) + getattr(
+            gripper, "visual_geoms", []
+        )
+        if not check_geoms:
+            check_geoms = gripper
+
         start_button_pressed = env.check_contact(
-            env.robots[0].gripper["right"], "{}_start_button".format(self.name)
+            check_geoms, "{}_start_button".format(self.name)
         )
 
         if self._turned_on is False and start_button_pressed:

@@ -94,7 +94,15 @@ if __name__ == "__main__":
         args.task = choose_option(
             tasks, "task", default="PnPCounterToCab", show_keys=True
         )
-    robots = OrderedDict([(0, "PandaOmron"), (1, "GR1FloatingBody")])
+    robots = OrderedDict(
+        [
+            (0, "PandaOmron"),
+            (1, "PandaDexLeapRHOmron"),
+            (2, "XArm6Omron"),
+            (3, "XArm6DexLeapRHOmron"),
+            (4, "GR1FloatingBody"),
+        ]
+    )
 
     if args.robot is None:
         robot_choice = choose_option(

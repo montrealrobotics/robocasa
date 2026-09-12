@@ -265,6 +265,9 @@ from robocasa.environments.kitchen.single_stage.kitchen_drawer import (
     CloseDrawer,
     OpenDrawer,
 )
+from robocasa.environments.kitchen.single_stage.kitchen_lamp import (
+    ScrewLightbulb,
+)
 from robocasa.environments.kitchen.single_stage.kitchen_microwave import (
     TurnOffMicrowave,
     TurnOnMicrowave,
@@ -311,10 +314,8 @@ assert (
 import numpy
 
 assert numpy.__version__ in [
-    "1.23.2",
-    "1.23.3",
-    "1.23.5",
-], "numpy version must be either 1.23.{2,3,5}. Please install one of these versions."
+    "2.2.5",
+], "numpy version must be 2.2.5. Please install this version."
 
 import robosuite
 

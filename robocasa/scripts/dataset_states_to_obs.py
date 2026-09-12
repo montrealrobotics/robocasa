@@ -21,6 +21,44 @@ import robocasa.utils.robomimic.robomimic_dataset_utils as DatasetUtils
 # from robomimic.utils.log_utils import log_warning
 
 
+# ---------------------------------------------------------------------------
+# Style augmentation helpers
+# ---------------------------------------------------------------------------
+
+# Coffee machine model used by each style (from kitchen_styles/*.yaml)
+STYLE_COFFEE_MACHINE = {
+    0: "delonghi_espresso",  # industrial
+    1: "nespresso",  # scandanavian
+    2: "delonghi_espresso_2",  # coastal
+    3: "delonghi_espresso_2",  # modern_1
+    4: "delonghi_espresso",  # modern_2
+    5: "delonghi_espresso",  # traditional_1
+    6: "delonghi_espresso_2",  # traditional_2
+    7: "nespresso",  # farmhouse
+    8: "nespresso",  # rustic
+    9: "delonghi_espresso",  # mediterranean
+    10: "nespresso",  # transitional_1
+    11: "delonghi_espresso_2",  # transitional_2
+}
+
+ALL_STYLE_IDS = list(range(12))
+
+
+def _styles_with_same_coffee_machine(style_id):
+    """Return list of style IDs that use the same coffee machine model."""
+    target = STYLE_COFFEE_MACHINE.get(int(style_id))
+    if target is None:
+        return ALL_STYLE_IDS
+    return [sid for sid, cm in STYLE_COFFEE_MACHINE.items() if cm == target]
+
+
+def _override_style_in_ep_meta(ep_meta_str, new_style_id):
+    """Return ep_meta JSON string with style_id overridden."""
+    ep_meta = json.loads(ep_meta_str) if ep_meta_str else {}
+    ep_meta["style_id"] = int(new_style_id)
+    return json.dumps(ep_meta, indent=4)
+
+
 def extract_trajectory(
     env,
     initial_state,
@@ -118,6 +156,113 @@ def extract_trajectory(
     return traj
 
 
+def extract_trajectory_with_style_override(
+    env,
+    original_initial_state,
+    states,
+    actions,
+    done_mode,
+    style_id,
+    add_datagen_info=False,
+):
+    """
+    Extract a trajectory rendered with a different kitchen style.
+
+    Builds a fresh model with the overridden style (via env.reset()) instead of
+    loading the saved model XML, then replays each state from the dataset.
+    Returns None if the state dimensions don't match (different fixture models).
+    """
+    # Override style in ep_meta
+    new_ep_meta = _override_style_in_ep_meta(
+        original_initial_state.get("ep_meta", None), style_id
+    )
+
+    # Build initial_state WITHOUT "model" key so reset_to() skips loading the
+    # saved XML and instead uses the freshly-built model from env.reset()
+    style_initial_state = {
+        "states": original_initial_state["states"],
+        "ep_meta": new_ep_meta,
+    }
+
+    # Set ep_meta and reset the env to build model with new style
+    ep_meta_dict = json.loads(new_ep_meta)
+    if hasattr(env.env, "set_ep_meta"):
+        env.env.set_ep_meta(ep_meta_dict)
+    elif hasattr(env.env, "set_attrs_from_ep_meta"):
+        env.env.set_attrs_from_ep_meta(ep_meta_dict)
+    env.reset(unset_ep_meta=False)
+
+    # Check state dimension match
+    env_state_dim = env.env.sim.get_state().flatten().shape[0]
+    dataset_state_dim = states.shape[1] if len(states.shape) > 1 else states.shape[0]
+    if env_state_dim != dataset_state_dim:
+        print(
+            f"  [style {style_id}] state dim mismatch: "
+            f"env={env_state_dim} vs dataset={dataset_state_dim}, skipping"
+        )
+        return None
+
+    # Now set the initial state (state vector only)
+    env.env.sim.set_state_from_flattened(style_initial_state["states"])
+    env.env.sim.forward()
+
+    # Get the model XML from the newly-built environment for storage
+    style_initial_state["model"] = env.env.sim.model.get_xml()
+
+    # Get updated ep meta
+    ep_meta_updated = env.env.get_ep_meta()
+    style_initial_state["ep_meta"] = json.dumps(ep_meta_updated, indent=4)
+
+    traj = dict(
+        obs=[],
+        next_obs=[],
+        rewards=[],
+        dones=[],
+        actions=np.array(actions),
+        states=np.array(states),
+        initial_state_dict=style_initial_state,
+        datagen_info=[],
+    )
+    traj_len = states.shape[0]
+    for t in range(traj_len):
+        obs = deepcopy(env.reset_to({"states": states[t]}))
+
+        if add_datagen_info:
+            datagen_info = env.base_env.get_datagen_info(action=actions[t])
+        else:
+            datagen_info = {}
+
+        r = env.get_reward()
+
+        done = False
+        if (done_mode == 1) or (done_mode == 2):
+            done = done or (t == traj_len)
+        if (done_mode == 0) or (done_mode == 2):
+            done = done or env.is_success()["task"]
+        done = int(done)
+
+        traj["obs"].append(obs)
+        traj["rewards"].append(r)
+        traj["dones"].append(done)
+        traj["datagen_info"].append(datagen_info)
+
+    traj["obs"] = TensorUtils.list_of_flat_dict_to_dict_of_list(traj["obs"])
+    traj["datagen_info"] = TensorUtils.list_of_flat_dict_to_dict_of_list(
+        traj["datagen_info"]
+    )
+
+    for k in traj:
+        if k == "initial_state_dict":
+            continue
+        if isinstance(traj[k], dict):
+            for kp in traj[k]:
+                traj[k][kp] = np.array(traj[k][kp])
+        else:
+            traj[k] = np.array(traj[k])
+
+    return traj
+
+
 """ The process that writes over the generated files to memory """
 
 
@@ -191,6 +336,15 @@ def write_traj_to_file(
                                 data=np.array(action_dict[k][()]),
                             )
 
+                    # copy through raw teleop signals recorded at collection time (pre-IK Quest /
+                    # Rokoko data). These cannot be regenerated from states, so carry them forward.
+                    src_ep = f["data/{}".format(ep)]
+                    for k in src_ep:
+                        if k.startswith("teleop_") and isinstance(
+                            src_ep[k], h5py.Dataset
+                        ):
+                            ep_data_grp.create_dataset(k, data=np.array(src_ep[k][()]))
+
                     # episode metadata
                     ep_data_grp.attrs["model_file"] = traj["initial_state_dict"][
                         "model"
@@ -246,6 +400,8 @@ def write_traj_to_file(
     data_grp.attrs["env_args"] = json.dumps(
         env.serialize(), indent=4
     )  # environment info
+    if getattr(args, "augment_styles", False):
+        data_grp.attrs["augment_styles"] = True
     print("Wrote {} total samples to {}".format(total_samples.value, output_path))
 
     f_out.close()
@@ -379,8 +535,10 @@ def extract_multiple_trajectories_with_error(
     if args.n is not None:
         demos = demos[: args.n]
 
+    do_augment_styles = getattr(args, "augment_styles", False)
+
     ind = retrieve_new_index(process_num, current_work_array, work_queue, lock)
-    while (not work_queue.empty()) and (ind != -1):
+    while ind != -1:
         try:
             # print("Running {} index".format(ind))
             ep = demos[ind]
@@ -425,6 +583,55 @@ def extract_multiple_trajectories_with_error(
             # print("(process {}): ADD TO QUEUE index {}".format(process_num, ind))
             mul_queue.put([ep, traj, process_num])
 
+            # --- Style augmentation: replay with compatible styles ---
+            if do_augment_styles and initial_state.get("ep_meta") is not None:
+                orig_ep_meta = json.loads(initial_state["ep_meta"])
+                orig_style = orig_ep_meta.get("style_id", None)
+                if orig_style is not None:
+                    compatible = _styles_with_same_coffee_machine(orig_style)
+                    for sid in compatible:
+                        if sid == int(orig_style):
+                            continue  # skip original style, already extracted
+                        aug_ep = f"{ep}_style{sid}"
+                        print(
+                            f"  (process {process_num}) Augmenting {ep} "
+                            f"with style {sid}..."
+                        )
+                        try:
+                            aug_traj = extract_trajectory_with_style_override(
+                                env=env,
+                                original_initial_state=initial_state,
+                                states=states,
+                                actions=actions,
+                                done_mode=args.done_mode,
+                                style_id=sid,
+                                add_datagen_info=args.add_datagen_info,
+                            )
+                            if aug_traj is not None:
+                                if args.copy_rewards:
+                                    aug_traj["rewards"] = f[
+                                        "data/{}/rewards".format(ep)
+                                    ][()]
+                                if args.copy_dones:
+                                    aug_traj["dones"] = f["data/{}/dones".format(ep)][
+                                        ()
+                                    ]
+                                mul_queue.put([aug_ep, aug_traj, process_num])
+                        except Exception as aug_e:
+                            print(
+                                f"  (process {process_num}) Style {sid} "
+                                f"augmentation failed for {ep}: {aug_e}"
+                            )
+                            # Recreate env after augmentation error
+                            del env
+                            env = EnvUtils.create_env_for_data_processing(
+                                env_meta=env_meta,
+                                camera_names=args.camera_names,
+                                camera_height=args.camera_height,
+                                camera_width=args.camera_width,
+                                reward_shaping=args.shaped,
+                            )
+
             ind = retrieve_new_index(process_num, current_work_array, work_queue, lock)
         except Exception as e:
             print("_" * 50)
@@ -458,10 +665,16 @@ def dataset_states_to_obs_multiprocessing(args):
             image_suffix = (
                 image_suffix + "_randcams" if args.randomize_cameras else image_suffix
             )
+            # Build output name from enabled augmentation flags
+            aug_prefix = ""
+            if getattr(args, "augment_styles", False):
+                aug_prefix += "_augstyles"
             if args.generative_textures:
+                aug_prefix += "_gentex"
+            if aug_prefix:
                 output_name = os.path.basename(args.dataset)[
                     :-5
-                ] + "_gentex_im{}.hdf5".format(image_suffix)
+                ] + "{}_im{}.hdf5".format(aug_prefix, image_suffix)
             else:
                 output_name = os.path.basename(args.dataset)[:-5] + "_im{}.hdf5".format(
                     image_suffix
@@ -490,8 +703,11 @@ def dataset_states_to_obs_multiprocessing(args):
     num_demos = len(demos)
     f.close()
 
-    env_meta = DatasetUtils.get_env_metadata_from_dataset(dataset_path=args.dataset)
-    num_processes = args.num_procs
+    if num_demos == 0:
+        print("No demonstrations found to process.")
+        return
+
+    num_processes = min(args.num_procs, num_demos)
 
     index = multiprocessing.Value("i", 0)
     lock = multiprocessing.Lock()
@@ -661,6 +877,14 @@ if __name__ == "__main__":
     parser.add_argument("--generative_textures", action="store_true")
 
     parser.add_argument("--randomize_cameras", action="store_true")
+
+    parser.add_argument(
+        "--augment_styles",
+        action="store_true",
+        help="for each trajectory, also render with all compatible kitchen styles "
+        "(same coffee machine model + matching state dimensions). "
+        "Works alongside --generative_textures and --randomize_cameras.",
+    )
 
     args = parser.parse_args()
     dataset_states_to_obs_multiprocessing(args)

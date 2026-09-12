@@ -4,6 +4,7 @@ from robocasa.utils.dataset_registry import (
     MULTI_STAGE_TASK_DATASETS,
 )
 from robocasa.scripts.playback_dataset import get_env_metadata_from_dataset
+from robocasa.utils.robot_utils import resolve_robot_names
 from robosuite.controllers import load_composite_controller_config
 import os
 import robosuite
@@ -34,6 +35,7 @@ def create_env(
     layout_ids=None,
     style_ids=None,
 ):
+    robots = resolve_robot_names(robots)
     controller_config = load_composite_controller_config(
         controller=None,
         robot=robots if isinstance(robots, str) else robots[0],

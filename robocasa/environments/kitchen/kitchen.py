@@ -3,6 +3,7 @@ import random
 import xml.etree.ElementTree as ET
 from copy import deepcopy
 
+import mujoco
 import numpy as np
 import robosuite.utils.transform_utils as T
 from robosuite.environments.manipulation.manipulation_env import ManipulationEnv
@@ -17,8 +18,6 @@ from robosuite.models.robots.robot_model import REGISTERED_ROBOTS
 from robosuite.utils.observables import Observable, sensor
 from robosuite.environments.base import EnvMeta
 from scipy.spatial.transform import Rotation
-
-from robosuite.models.robots import PandaOmron
 
 import robocasa
 import robocasa.macros as macros
@@ -41,6 +40,11 @@ from robocasa.utils.texture_swap import (
     replace_wall_texture,
 )
 from robocasa.utils.config_utils import refactor_composite_controller_config
+from robocasa.utils.robot_utils import (
+    get_null_action,
+    get_robot_config,
+    resolve_robot_names,
+)
 
 
 REGISTERED_KITCHEN_ENVS = {}
@@ -277,10 +281,9 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         if isinstance(robots, str):
             robots = [robots]
 
-        # backward compatibility: rename all robots that were previously called PandaMobile -> PandaOmron
-        for i in range(len(robots)):
-            if robots[i] == "PandaMobile":
-                robots[i] = "PandaOmron"
+        # expand short names (eg "xarm6" -> "XArm6Omron"), which also handles the robots that
+        # were renamed in robosuite v1.5 (eg "PandaMobile" -> "PandaOmron")
+        robots = resolve_robot_names(robots)
         assert len(robots) == 1
 
         # intialize cameras
@@ -297,12 +300,14 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             controller_configs = refactor_composite_controller_config(
                 controller_configs, robots[0], arms
             )
-            if robots[0] == "PandaOmron":
+            robot_config = get_robot_config(robots[0])
+            if robot_config is not None:
+                # pin the action vector layout so it does not depend on the embodiment
                 if "composite_controller_specific_configs" not in controller_configs:
                     controller_configs["composite_controller_specific_configs"] = {}
                 controller_configs["composite_controller_specific_configs"][
                     "body_part_ordering"
-                ] = ["right", "right_gripper", "base", "torso"]
+                ] = robot_config["body_part_ordering"]
 
         super().__init__(
             robots=robots,
@@ -339,17 +344,11 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
         super()._load_model()
 
         for robot in self.robots:
-            if isinstance(robot.robot_model, PandaOmron):
-                robot.init_qpos = (
-                    -0.01612974,
-                    -1.03446714,
-                    -0.02397936,
-                    -2.27550888,
-                    0.03932365,
-                    1.51639493,
-                    0.69615947,
-                )
-                robot.init_torso_qpos = np.array([0.0])
+            # apply the kitchen-specific spawn pose for this embodiment (see robot_utils)
+            robot_config = get_robot_config(robot.robot_model)
+            if robot_config is not None:
+                robot.init_qpos = robot_config["init_qpos"]
+                robot.init_torso_qpos = robot_config["init_torso_qpos"]
 
         # determine sample layout and style
         if "layout_id" in self._ep_meta and "style_id" in self._ep_meta:
@@ -482,6 +481,24 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             return
         self.object_placements = object_placements
 
+    def _merge_object_model(self, model):
+        """
+        Merges an object model into the task.
+
+        Task.merge_objects only takes the object's body and its assets, so anything an
+        object declares at the top level of its xml would be silently dropped. Articulated
+        objects need those: the lamp assembly's screw joint is a joint-to-joint <equality>,
+        and it excludes bulb/base contact so the shell does not fight the constraint.
+
+        Args:
+            model (MujocoObject): object model to merge
+        """
+        self.model.merge_objects([model])
+        for elem in model.equality:
+            self.model.equality.append(elem)
+        for elem in model.contact:
+            self.model.contact.append(elem)
+
     def _create_objects(self):
         """
         Creates and places objects in the kitchen environment.
@@ -497,7 +514,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                 model, info = self._create_obj(cfg)
                 cfg["info"] = info
                 self.objects[model.name] = model
-                self.model.merge_objects([model])
+                self._merge_object_model(model)
         else:
             self.object_cfgs = self._get_obj_cfgs()
             addl_obj_cfgs = []
@@ -508,7 +525,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                 model, info = self._create_obj(cfg)
                 cfg["info"] = info
                 self.objects[model.name] = model
-                self.model.merge_objects([model])
+                self._merge_object_model(model)
 
                 try_to_place_in = cfg["placement"].get("try_to_place_in", None)
 
@@ -533,7 +550,7 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                     model, info = self._create_obj(container_cfg)
                     container_cfg["info"] = info
                     self.objects[model.name] = model
-                    self.model.merge_objects([model])
+                    self._merge_object_model(model)
 
                     # modify object config to lie inside of container
                     cfg["placement"] = dict(
@@ -754,11 +771,19 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
                     if x_halfsize == 0.0:
                         inner_xpos = 0.0
                     else:
-                        ref_fixture = self.get_fixture(
-                            placement["sample_region_kwargs"]["ref"]
-                        )
-                        ref_pos = ref_fixture.pos
-                        fixture_to_ref = OU.get_rel_transform(fixture, ref_fixture)[0]
+                        region_ref = placement["sample_region_kwargs"]["ref"]
+                        if isinstance(region_ref, (list, tuple, np.ndarray)):
+                            # ref given as a global point (eg the robot base) rather than a
+                            # fixture, so the inner window can be aligned to something that
+                            # is not a fixture
+                            fixture_to_ref = OU.get_fixture_to_point_rel_offset(
+                                fixture, np.asarray(region_ref, dtype=float).reshape(3)
+                            )
+                        else:
+                            ref_fixture = self.get_fixture(region_ref)
+                            fixture_to_ref = OU.get_rel_transform(fixture, ref_fixture)[
+                                0
+                            ]
                         outer_to_ref = fixture_to_ref - reset_region["offset"]
                         inner_xpos = outer_to_ref[0] / x_halfsize
                         inner_xpos = np.clip(inner_xpos, a_min=-1.0, a_max=1.0)
@@ -876,6 +901,26 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
 
         return placement_initializer
 
+    def _get_obj_root_joint(self, obj):
+        """
+        Gets the free joint that positions @obj in the world.
+
+        Most objects have exactly one joint, but articulated objects (eg the lamp assembly,
+        whose bulb rides a screw joint) declare their own joints inside nested bodies, and
+        those come first in the xml. Pick the free joint by type instead of by position.
+
+        Args:
+            obj (MujocoObject): object to look up
+
+        Returns:
+            str: name of the object's free joint
+        """
+        for joint in obj.joints:
+            joint_id = self.sim.model.joint_name2id(joint)
+            if self.sim.model.jnt_type[joint_id] == mujoco.mjtJoint.mjJNT_FREE:
+                return joint
+        return obj.joints[0]
+
     def _reset_internal(self):
         """
         Resets simulation internal configurations.
@@ -890,12 +935,14 @@ class Kitchen(ManipulationEnv, metaclass=KitchenEnvMeta):
             # Loop through all objects and reset their positions
             for obj_pos, obj_quat, obj in object_placements.values():
                 self.sim.data.set_joint_qpos(
-                    obj.joints[0],
+                    self._get_obj_root_joint(obj),
                     np.concatenate([np.array(obj_pos), np.array(obj_quat)]),
                 )
 
-        # step through a few timesteps to settle objects
-        action = np.zeros(self.action_spec[0].shape)  # apply empty action
+        # step through a few timesteps to settle objects. the action has to hold the robot in
+        # place rather than be all zeros, since zeros command joint angles of 0 for the arm
+        # controllers that take absolute inputs (eg joint position control)
+        action = get_null_action(self)
 
         # Since the env.step frequency is slower than the mjsim timestep frequency, the internal controller will output
         # multiple torque commands in between new high level action commands. Therefore, we need to denote via
